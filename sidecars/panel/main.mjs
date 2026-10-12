@@ -302,7 +302,28 @@ function getFileBadge(filepath) {
   return { label: 'FILE', color: '#94a3b8' };
 }
 
-// Extracts detailed execution history (native Antigravity IDE chat style)
+function cleanUserContent(raw) {
+  if (!raw) return '';
+  let text = String(raw);
+  const matchReq = text.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/i);
+  if (matchReq && matchReq[1]) {
+    text = matchReq[1];
+  } else {
+    const matchSys = text.match(/content=([\s\S]*?)(\n<\/SYSTEM_MESSAGE>|$)/i);
+    if (matchSys && matchSys[1]) {
+      text = matchSys[1];
+    } else {
+      text = text.replace(/<SYSTEM_MESSAGE>[\s\S]*?<\/SYSTEM_MESSAGE>/gi, '');
+    }
+  }
+  text = text.replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/gi, '');
+  text = text.replace(/<USER_SETTINGS_CHANGE>[\s\S]*?<\/USER_SETTINGS_CHANGE>/gi, '');
+  text = text.replace(/^The following is a <SYSTEM_MESSAGE>[\s\S]*?<SYSTEM_MESSAGE>/gi, '');
+  text = text.replace(/<\/SYSTEM_MESSAGE>/gi, '');
+  return text.trim();
+}
+
+// Extracts detailed execution and chat history (native Antigravity IDE chat style)
 function parseExecutionSteps(targetConversationId) {
   let logFile = join(homedir(), '.gemini', 'antigravity', 'brain', targetConversationId, '.system_generated', 'logs', 'transcript_full.jsonl');
   if (!existsSync(logFile)) {
@@ -318,6 +339,7 @@ function parseExecutionSteps(targetConversationId) {
     let lastTime = null;
     let hasEdit = false;
     let hasAnalyze = false;
+    let lastWasQuestion = false;
 
     for (let i = 0; i < lines.length; i++) {
       const step = safeParseJson(lines[i]);
@@ -330,18 +352,68 @@ function parseExecutionSteps(targetConversationId) {
       }
       if (stepTime) lastTime = stepTime;
 
-      // 1. Thinking / Reasoning block (Native Antigravity style)
+      // 1. User messages (USER_EXPLICIT or USER_INPUT)
+      if (step.source === 'USER_EXPLICIT' || step.type === 'USER_INPUT') {
+        const userText = cleanUserContent(step.content);
+        if (userText) {
+          events.push({
+            type: 'user_message',
+            id: `user-${i}`,
+            sender: 'User',
+            text: userText,
+            timestamp: step.created_at || null
+          });
+        }
+        lastWasQuestion = false;
+        continue;
+      }
+
+      // 1b. Initial system / subagent task instruction (if i === 0 and source is SYSTEM)
+      if (i === 0 && step.source === 'SYSTEM' && step.content) {
+        const sysText = cleanUserContent(step.content);
+        if (sysText) {
+          events.push({
+            type: 'user_message',
+            id: `task-0`,
+            sender: 'Task Instruction',
+            text: sysText,
+            timestamp: step.created_at || null
+          });
+        }
+        lastWasQuestion = false;
+        continue;
+      }
+
+      // 1c. User answer to ask_question (GENERIC step immediately following ask_question)
+      if (lastWasQuestion && step.type === 'GENERIC' && step.content) {
+        const ansText = step.content.trim();
+        if (ansText) {
+          events.push({
+            type: 'user_message',
+            id: `answer-${i}`,
+            sender: 'User Answer',
+            text: ansText,
+            timestamp: step.created_at || null
+          });
+        }
+        lastWasQuestion = false;
+        continue;
+      }
+      lastWasQuestion = false;
+
+      // 2. Thinking / Reasoning block (Native Antigravity style)
       if (step.thinking && typeof step.thinking === 'string' && step.thinking.trim()) {
-        const thoughtSec = durationSeconds || Math.floor(Math.random() * 20 + 5);
+        const thoughtSec = durationSeconds || Math.floor(Math.random() * 15 + 3);
         events.push({
           type: 'thought',
           id: `thought-${i}`,
           label: `Thought for ${thoughtSec}s`,
-          text: step.thinking.trim()
+          text: step.thinking.trim(),
+          timestamp: step.created_at || null
         });
       }
 
-      // 2. Tool calls
+      // 3. Tool calls
       if (step.tool_calls && Array.isArray(step.tool_calls)) {
         for (let tcIdx = 0; tcIdx < step.tool_calls.length; tcIdx++) {
           const tc = step.tool_calls[tcIdx];
@@ -353,7 +425,16 @@ function parseExecutionSteps(targetConversationId) {
           let diffAdd = 0;
           let diffDel = 0;
 
-          if (tc.name === 'view_file') {
+          if (tc.name === 'ask_question') {
+            verb = 'Asked';
+            badge = { label: '❓', color: '#f59e0b' };
+            lastWasQuestion = true;
+            if (args.questions && Array.isArray(args.questions) && args.questions[0]) {
+              target = args.questions[0].question || 'Question to user';
+            } else {
+              target = 'Question to user';
+            }
+          } else if (tc.name === 'view_file') {
             verb = 'Analyzed';
             hasAnalyze = true;
             const fullPath = args.AbsolutePath || args.TargetFile || '';
@@ -415,25 +496,20 @@ function parseExecutionSteps(targetConversationId) {
             target,
             details,
             diffAdd,
-            diffDel
+            diffDel,
+            timestamp: step.created_at || null
           });
         }
       }
 
-      // 3. User instruction / initial message
-      if (i === 0 && step.source === 'SYSTEM' && step.content) {
-        let msg = step.content;
-        const match = msg.match(/content=(.*?)(\n<\/SYSTEM_MESSAGE>|$)/s);
-        if (match && match[1]) msg = match[1].trim();
-        else msg = msg.replace(/^The following is a <SYSTEM_MESSAGE>[\s\S]*?<SYSTEM_MESSAGE>/, '').replace(/<\/SYSTEM_MESSAGE>$/, '').trim();
-
-        events.unshift({
-          type: 'instruction',
-          id: 'step-0',
-          verb: 'Received',
-          badge: { label: 'IN', color: '#38bdf8' },
-          target: 'User instruction',
-          details: msg.slice(0, 100)
+      // 4. Assistant visible response text
+      if (step.source === 'MODEL' && step.type === 'PLANNER_RESPONSE' && step.content && typeof step.content === 'string' && step.content.trim()) {
+        events.push({
+          type: 'assistant_message',
+          id: `assistant-${i}`,
+          sender: 'Assistant',
+          text: step.content.trim(),
+          timestamp: step.created_at || null
         });
       }
     }

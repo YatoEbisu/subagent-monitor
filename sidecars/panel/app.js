@@ -874,13 +874,22 @@ function updateInspector() {
   const stateEl = $('insp-state');
   const promptEl = $('insp-prompt');
   const toolEl = $('insp-tool');
+  const statusDot = $('insp-status-dot');
+  const chatInput = $('chat-msg-input');
 
   if (state.selectedId === 'root') {
-    if (titleEl) titleEl.textContent = 'Main Agent (Chat)';
+    if (titleEl) titleEl.textContent = 'Main Agent';
     if (badgeEl) badgeEl.textContent = 'chat-root';
-    if (stateEl) stateEl.textContent = `Status: ${state.mainAgent?.state === 'running' ? 'EXECUTING' : 'IDLE'}`;
+    const isRunning = state.mainAgent?.state === 'running';
+    if (stateEl) stateEl.textContent = `Status: ${isRunning ? 'Executing' : 'Monitoring'}`;
+    if (statusDot) {
+      statusDot.className = 'live-dot';
+      if (isRunning) statusDot.classList.add('dot-pulse');
+      statusDot.style.background = isRunning ? 'var(--status-green)' : '#38bdf8';
+    }
     if (promptEl) promptEl.textContent = '"Active session in Antigravity IDE."';
     if (toolEl) toolEl.textContent = state.mainAgent?.lastAction || 'No recent tools';
+    if (chatInput) chatInput.placeholder = 'Send instruction to Main Agent (Enter to send)...';
     return;
   }
 
@@ -888,13 +897,34 @@ function updateInspector() {
   if (sub) {
     const isWaiting =
       sub.state === 'waiting_for_input' || sub.state === 'blocked' || sub.state === 'needs_attention';
+    const isRunning = sub.state === 'running';
+    const isDone = sub.state === 'done';
+
     if (titleEl) titleEl.textContent = sub.role;
-    if (badgeEl) badgeEl.textContent = `type: ${sub.type}`;
+    if (badgeEl) badgeEl.textContent = sub.type || 'subagent';
+    if (chatInput) chatInput.placeholder = `Send instruction to ${sub.role} (Enter to send)...`;
+
+    if (statusDot) {
+      statusDot.className = 'live-dot';
+      if (isWaiting) {
+        statusDot.style.background = 'var(--status-amber)';
+        statusDot.classList.add('dot-pulse');
+      } else if (isRunning) {
+        statusDot.style.background = 'var(--status-green)';
+        statusDot.classList.add('dot-pulse');
+      } else if (isDone) {
+        statusDot.style.background = '#38bdf8';
+        statusDot.classList.remove('dot-pulse');
+      } else {
+        statusDot.style.background = 'var(--muted-foreground)';
+      }
+    }
+
     if (stateEl) {
       if (isWaiting) {
-        stateEl.innerHTML = `<span style="color: #f59e0b; font-weight: 700;">⚠️ WAITING FOR APPROVAL / INPUT</span>`;
+        stateEl.innerHTML = `<span style="color: #f59e0b; font-weight: 600;">⚠️ Needs Approval</span>`;
       } else {
-        stateEl.textContent = `Status: ${sub.state.toUpperCase()}`;
+        stateEl.textContent = `Status: ${sub.state.charAt(0).toUpperCase() + sub.state.slice(1)}`;
       }
     }
     if (promptEl) promptEl.textContent = `"${sub.prompt || sub.stateDetail || 'No detailed prompt'}"`;
@@ -918,7 +948,7 @@ window.selectNode = (id) => {
     const toggleIcon = $('insp-toggle-icon');
     if (toggleIcon) toggleIcon.textContent = '▼';
     localStorage.setItem('subagent-monitor-inspector-collapsed', 'false');
-    const savedHeight = localStorage.getItem('subagent-monitor-inspector-height') || 210;
+    const savedHeight = localStorage.getItem('subagent-monitor-inspector-height') || 340;
     panel.style.height = `${savedHeight}px`;
   }
 
@@ -939,6 +969,27 @@ function escapeXml(unsafe) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
+}
+
+function formatMessageText(raw) {
+  if (!raw) return '';
+  let text = escapeXml(raw);
+
+  // Fenced code blocks
+  text = text.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (m, lang, code) => {
+    return `<pre><code>${code.trim()}</code></pre>`;
+  });
+
+  // Inline code
+  text = text.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+  // Bold
+  text = text.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+
+  // Bullet items
+  text = text.replace(/^[\s]*[-*]\s+([^\n]+)/gm, '• $1');
+
+  return text;
 }
 
 window.toggleThoughtBlock = (thoughtEl, event) => {
@@ -971,7 +1022,7 @@ async function fetchExecutionSteps() {
   if (!targetConvId) {
     if (badgeEl) badgeEl.textContent = '0';
     if (emptyEl) {
-      emptyEl.textContent = 'No actions recorded for this subagent yet.';
+      emptyEl.textContent = 'No actions recorded for this agent yet.';
       emptyEl.style.display = 'block';
     }
     if (streamListEl) streamListEl.innerHTML = '';
@@ -989,7 +1040,7 @@ async function fetchExecutionSteps() {
 
     if (events.length === 0) {
       if (emptyEl) {
-        emptyEl.textContent = 'No actions recorded for this subagent yet.';
+        emptyEl.textContent = 'No conversation or actions recorded for this agent yet.';
         emptyEl.style.display = 'block';
       }
       if (streamListEl) streamListEl.innerHTML = '';
@@ -1014,9 +1065,37 @@ async function fetchExecutionSteps() {
       });
     }
 
+    const sub = (state.subagents || []).find((s) => s.id === state.selectedId);
     let html = '';
+
     events.forEach((ev) => {
-      if (ev.type === 'thought') {
+      const timeStr = ev.timestamp
+        ? new Date(ev.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : '';
+
+      if (ev.type === 'user_message') {
+        html += `
+          <div class="chat-msg-user">
+            <div class="msg-meta">
+              <span>${escapeXml(ev.sender || 'User')}</span>
+              ${timeStr ? `<span>${escapeXml(timeStr)}</span>` : ''}
+            </div>
+            <div class="msg-text">${formatMessageText(ev.text)}</div>
+          </div>
+        `;
+      } else if (ev.type === 'assistant_message') {
+        const agentName = state.selectedId === 'root' ? 'Antigravity' : (sub?.role || 'Assistant');
+        html += `
+          <div class="chat-msg-assistant">
+            <div class="msg-meta">
+              <span class="msg-avatar">⚡</span>
+              <span>${escapeXml(agentName)}</span>
+              ${timeStr ? `<span style="margin-left: auto; color: #71717a; font-weight: normal; font-size: 10px;">${escapeXml(timeStr)}</span>` : ''}
+            </div>
+            <div class="msg-text">${formatMessageText(ev.text)}</div>
+          </div>
+        `;
+      } else if (ev.type === 'thought') {
         const isOpen = openIds.has(ev.id);
         html += `
           <div class="ag-thought-item ${isOpen ? 'is-open' : ''}" data-id="${escapeXml(ev.id)}">
@@ -1043,7 +1122,7 @@ async function fetchExecutionSteps() {
           <div class="ag-action-item">
             <span class="ag-verb">${escapeXml(ev.verb)}</span>
             ${badgeLabel ? `<span class="ag-badge" style="color: ${badgeColor}">${escapeXml(badgeLabel)}</span>` : ''}
-            <span class="ag-target">${escapeXml(ev.target)}</span>
+            <span class="ag-target" title="${escapeXml(ev.target)}">${escapeXml(ev.target)}</span>
             ${ev.details ? `<span class="ag-details">${escapeXml(ev.details)}</span>` : ''}
             ${diffHtml}
           </div>
@@ -1061,7 +1140,6 @@ async function fetchExecutionSteps() {
     }
 
     // Determine working vs done status
-    const sub = (state.subagents || []).find((s) => s.id === state.selectedId);
     const isDone = sub ? sub.state === 'done' : (state.mainAgent?.state === 'idle');
     if (statusFooter) {
       if (isDone) {
@@ -1164,16 +1242,23 @@ async function fetchStatus() {
   }
 }
 
-async function sendDirectMessage() {
-  const input = $('direct-msg-input');
+async function sendDirectMessage(sourceInputId = 'chat-msg-input') {
+  let input = $(sourceInputId);
+  if (!input || !input.value.trim()) {
+    input = $(sourceInputId === 'chat-msg-input' ? 'direct-msg-input' : 'chat-msg-input');
+  }
   if (!input || !input.value.trim()) return;
 
   const msg = input.value.trim();
   try {
     if (sidecar && sidecar.agent) {
       await sidecar.agent.sendMessage(msg);
-      input.value = '';
+      if ($('chat-msg-input')) $('chat-msg-input').value = '';
+      if ($('direct-msg-input')) $('direct-msg-input').value = '';
       fetchStatus();
+      if (state.activeTab === 'execution') {
+        fetchExecutionSteps();
+      }
     }
   } catch (err) {
     console.error('Error sending message:', err);
@@ -1193,7 +1278,6 @@ function setupSidebarResizer() {
   if (savedWidth) {
     const parsed = parseInt(savedWidth, 10);
     if (!isNaN(parsed) && parsed >= 240 && parsed <= 700) {
-      // If it was the old default of 280px, raise to 360px
       const widthToApply = parsed === 280 ? 360 : parsed;
       sidebar.style.width = `${widthToApply}px`;
     }
@@ -1231,7 +1315,7 @@ function setupSidebarResizer() {
 }
 
 // ---------------------------------------------------------------------------
-// Inspector Collapse / Expand
+// Inspector Collapse / Expand / Maximize
 // ---------------------------------------------------------------------------
 
 function setupInspectorToggle() {
@@ -1247,7 +1331,7 @@ function setupInspectorToggle() {
     if (toggleIcon) toggleIcon.textContent = '▶';
   } else {
     panel.classList.remove('is-collapsed');
-    const savedHeight = localStorage.getItem('subagent-monitor-inspector-height') || 210;
+    const savedHeight = localStorage.getItem('subagent-monitor-inspector-height') || 340;
     panel.style.height = `${savedHeight}px`;
     if (toggleIcon) toggleIcon.textContent = '▼';
   }
@@ -1259,7 +1343,7 @@ function setupInspectorToggle() {
     if (collapsed) {
       panel.style.height = 'auto';
     } else {
-      const savedHeight = localStorage.getItem('subagent-monitor-inspector-height') || 210;
+      const savedHeight = localStorage.getItem('subagent-monitor-inspector-height') || 340;
       panel.style.height = `${savedHeight}px`;
     }
     autoFitGraph(false);
@@ -1280,6 +1364,26 @@ function setupInspectorToggle() {
   }
 }
 
+function setupInspectorMaximize() {
+  const expandBtn = $('btn-expand-inspector');
+  const panel = $('inspector-panel');
+  const icon = $('insp-expand-icon');
+  if (!expandBtn || !panel) return;
+
+  expandBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (panel.classList.contains('is-collapsed')) {
+      panel.classList.remove('is-collapsed');
+      const toggleIcon = $('insp-toggle-icon');
+      if (toggleIcon) toggleIcon.textContent = '▼';
+    }
+    panel.classList.toggle('is-maximized');
+    const isMax = panel.classList.contains('is-maximized');
+    if (icon) icon.textContent = isMax ? '⤡' : '⤢';
+    autoFitGraph(false);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Inspector Height Resizing (Vertical Resizer)
 // ---------------------------------------------------------------------------
@@ -1290,17 +1394,17 @@ function setupInspectorResizer() {
   const contentArea = panel ? panel.closest('.content-area') : null;
   if (!resizer || !panel || !contentArea) return;
 
-  const defaultHeight = 210;
+  const defaultHeight = 340;
   const savedHeight = localStorage.getItem('subagent-monitor-inspector-height');
   let currentHeight = defaultHeight;
   if (savedHeight) {
     const parsed = parseInt(savedHeight, 10);
-    if (!isNaN(parsed) && parsed >= 100 && parsed <= 700) {
+    if (!isNaN(parsed) && parsed >= 120 && parsed <= 800) {
       currentHeight = parsed;
     }
   }
 
-  if (!panel.classList.contains('is-collapsed')) {
+  if (!panel.classList.contains('is-collapsed') && !panel.classList.contains('is-maximized')) {
     panel.style.height = `${currentHeight}px`;
   }
 
@@ -1313,6 +1417,11 @@ function setupInspectorResizer() {
       if (toggleIcon) toggleIcon.textContent = '▼';
       localStorage.setItem('subagent-monitor-inspector-collapsed', 'false');
     }
+    if (panel.classList.contains('is-maximized')) {
+      panel.classList.remove('is-maximized');
+      const icon = $('insp-expand-icon');
+      if (icon) icon.textContent = '⤢';
+    }
 
     isDragging = true;
     resizer.classList.add('is-dragging');
@@ -1324,7 +1433,7 @@ function setupInspectorResizer() {
   window.addEventListener('mousemove', (e) => {
     if (!isDragging) return;
     const rect = contentArea.getBoundingClientRect();
-    const newHeight = Math.max(100, Math.min(rect.height - 100, rect.bottom - e.clientY));
+    const newHeight = Math.max(120, Math.min(rect.height - 80, rect.bottom - e.clientY));
     panel.style.height = `${newHeight}px`;
     currentHeight = newHeight;
   });
@@ -1351,12 +1460,28 @@ async function init() {
   }
 
   if ($('direct-msg-send')) {
-    $('direct-msg-send').addEventListener('click', sendDirectMessage);
+    $('direct-msg-send').addEventListener('click', () => sendDirectMessage('direct-msg-input'));
   }
-
   if ($('direct-msg-input')) {
     $('direct-msg-input').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') sendDirectMessage();
+      if (e.key === 'Enter') sendDirectMessage('direct-msg-input');
+    });
+  }
+
+  if ($('chat-msg-send')) {
+    $('chat-msg-send').addEventListener('click', () => sendDirectMessage('chat-msg-input'));
+  }
+  if ($('chat-msg-input')) {
+    $('chat-msg-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') sendDirectMessage('chat-msg-input');
+    });
+  }
+
+  if ($('btn-scroll-bottom')) {
+    $('btn-scroll-bottom').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const container = $('execution-log-container');
+      if (container) container.scrollTop = container.scrollHeight;
     });
   }
 
@@ -1374,6 +1499,7 @@ async function init() {
   setupSidebarResizer();
   setupInspectorToggle();
   setupInspectorResizer();
+  setupInspectorMaximize();
   setupInspectorTabs();
   fetchStatus();
   setInterval(fetchStatus, 1500);

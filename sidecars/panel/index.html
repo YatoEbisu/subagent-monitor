@@ -79,24 +79,28 @@
               <button id="btn-toggle-inspector" class="inspector-toggle-btn" title="Toggle Inspector Panel">
                 <span id="insp-toggle-icon">▼</span>
               </button>
+              <button id="btn-expand-inspector" class="inspector-toggle-btn" title="Maximize / Restore Height">
+                <span id="insp-expand-icon">⤢</span>
+              </button>
+              <span class="live-dot" id="insp-status-dot"></span>
               <span id="insp-title" style="font-weight: 600; font-size: 12px;">Main Agent</span>
               <span class="node-badge" id="insp-badge">chat-root</span>
             </div>
 
             <div class="inspector-header-right">
               <div class="inspector-tabs">
-                <button id="tab-overview" class="inspector-tab active" title="Show node prompt and status">Overview</button>
-                <button id="tab-execution" class="inspector-tab" title="Show real-time execution steps">
-                  Execution Log <span id="execution-badge" class="tab-badge">0</span>
+                <button id="tab-overview" class="inspector-tab" title="Show node prompt and status">Overview</button>
+                <button id="tab-execution" class="inspector-tab active" title="Show real-time chat and execution timeline">
+                  Chat & Timeline <span id="execution-badge" class="tab-badge">0</span>
                 </button>
               </div>
-              <span id="insp-state" style="font-family: monospace; font-size: 10px; color: var(--muted-foreground, #94a3b8)">Status: Monitoring</span>
+              <span id="insp-state" class="insp-status-text">Status: Monitoring</span>
             </div>
           </div>
 
           <div class="inspector-body" id="inspector-body">
             <!-- PANE 1: OVERVIEW -->
-            <div id="pane-overview" class="inspector-pane active">
+            <div id="pane-overview" class="inspector-pane">
               <div class="inspector-grid">
                 <div class="inspector-card">
                   <span class="label">Prompt / Instruction:</span>
@@ -105,7 +109,7 @@
                 <div class="inspector-card">
                   <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px;">
                     <span class="label" style="margin-bottom: 0;">Last Tool:</span>
-                    <button id="btn-quick-view-exec" class="quick-view-exec-btn">View Log →</button>
+                    <button id="btn-quick-view-exec" class="quick-view-exec-btn">View Chat →</button>
                   </div>
                   <div class="value" id="insp-tool" style="color: #d4d4d8">No active tool</div>
                 </div>
@@ -124,18 +128,37 @@
               </div>
             </div>
 
-            <!-- PANE 2: EXECUTION LOG (ANTIGRAVITY NATIVE STYLE) -->
-            <div id="pane-execution" class="inspector-pane">
+            <!-- PANE 2: CHAT & EXECUTION TIMELINE (ANTIGRAVITY NATIVE STYLE) -->
+            <div id="pane-execution" class="inspector-pane active">
               <div class="execution-log-container" id="execution-log-container">
                 <div class="ag-stream-header" id="ag-stream-header">
-                  <span id="ag-phase-text">Exploring files, editing files</span>
-                  <span class="ag-chevron">⌄</span>
+                  <div class="ag-stream-header-left">
+                    <span class="ag-stream-title">Conversation & Activity Stream</span>
+                    <span class="ag-phase-pill" id="ag-phase-text">Exploring files, editing files</span>
+                  </div>
+                  <div class="ag-stream-header-right">
+                    <button id="btn-scroll-bottom" class="stream-action-btn" title="Scroll to bottom">↓ Latest</button>
+                  </div>
                 </div>
-                <div class="execution-empty" id="execution-empty">No actions recorded for this subagent yet.</div>
+                <div class="execution-empty" id="execution-empty">No conversation or actions recorded for this agent yet.</div>
                 <div class="ag-stream-list" id="execution-stream-list"></div>
                 <div class="ag-status-footer" id="ag-status-footer">
                   <span class="ag-status-spinner" id="ag-status-spinner"></span>
                   <span id="ag-status-text">Working</span>
+                </div>
+              </div>
+
+              <!-- Chat Input Bar attached directly to Chat & Timeline -->
+              <div class="chat-input-row" id="chat-input-row">
+                <div class="chat-input-wrapper">
+                  <input type="text" id="chat-msg-input" class="chat-input-field" placeholder="Send instruction to this agent (Enter to send)..." />
+                  <button id="chat-msg-send" class="btn-chat-send" title="Send message">
+                    <span>Send</span>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M5 12h14" />
+                      <path d="m12 5 7 7-7 7" />
+                    </svg>
+                  </button>
                 </div>
               </div>
             </div>
