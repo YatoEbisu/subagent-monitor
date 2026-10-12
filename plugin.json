@@ -1,0 +1,5 @@
+{
+  "name": "subagent-monitor",
+  "description": "Real-time visual subagent monitor and DAG execution graph for any project.",
+  "logo": "assets/logo.svg"
+}
