@@ -939,6 +939,7 @@ function updateInspector() {
 }
 
 window.selectNode = (id) => {
+  lastExecutionRenderKey = '';
   state.selectedId = id;
 
   // Expand panel if collapsed
@@ -997,6 +998,13 @@ window.toggleThoughtBlock = (thoughtEl, event) => {
   thoughtEl.classList.toggle('is-open');
 };
 
+window.toggleActivityGroup = (groupEl, event) => {
+  if (event) event.stopPropagation();
+  groupEl.classList.toggle('is-open');
+};
+
+let lastExecutionRenderKey = '';
+
 // ---------------------------------------------------------------------------
 // Execution Stream Feed (Antigravity Native Chat Style)
 // ---------------------------------------------------------------------------
@@ -1020,6 +1028,7 @@ async function fetchExecutionSteps() {
   const statusText = $('ag-status-text');
 
   if (!targetConvId) {
+    lastExecutionRenderKey = '';
     if (badgeEl) badgeEl.textContent = '0';
     if (emptyEl) {
       emptyEl.textContent = 'No actions recorded for this agent yet.';
@@ -1037,6 +1046,25 @@ async function fetchExecutionSteps() {
 
     const events = res.events || [];
     if (badgeEl) badgeEl.textContent = events.length;
+
+    const sub = (state.subagents || []).find((s) => s.id === state.selectedId);
+    const isDone = sub ? sub.state === 'done' : (state.mainAgent?.state === 'idle');
+
+    // Anti-flicker: if nothing changed in data or status, do NOT touch DOM
+    const renderKey = `${targetConvId}:${events.length}:${events.length > 0 ? events[events.length - 1].id : ''}:${res.phase}:${isDone ? 1 : 0}`;
+    if (streamListEl && streamListEl.children.length > 0 && renderKey === lastExecutionRenderKey) {
+      if (statusFooter) {
+        if (isDone) {
+          statusFooter.classList.add('is-done');
+          if (statusText) statusText.textContent = 'Done';
+        } else {
+          statusFooter.classList.remove('is-done');
+          if (statusText) statusText.textContent = 'Working';
+        }
+      }
+      return;
+    }
+    lastExecutionRenderKey = renderKey;
 
     if (events.length === 0) {
       if (emptyEl) {
@@ -1056,24 +1084,102 @@ async function fetchExecutionSteps() {
       phaseTextEl.textContent = res.phase || 'Executing tasks';
     }
 
-    // Preserve open state of thought blocks
-    const openIds = new Set();
+    // Preserve open state of groups and thoughts
+    const openGroupIds = new Set();
+    const openThoughtIds = new Set();
     if (streamListEl) {
+      streamListEl.querySelectorAll('.ag-activity-group.is-open').forEach((el) => {
+        const id = el.getAttribute('data-id');
+        if (id) openGroupIds.add(id);
+      });
       streamListEl.querySelectorAll('.ag-thought-item.is-open').forEach((el) => {
         const id = el.getAttribute('data-id');
-        if (id) openIds.add(id);
+        if (id) openThoughtIds.add(id);
       });
     }
 
-    const sub = (state.subagents || []).find((s) => s.id === state.selectedId);
     let html = '';
+    let pendingActivities = [];
+    let groupIdx = 0;
+
+    function flushActivities(isFinal = false) {
+      if (pendingActivities.length === 0) return;
+      const gid = `act-${groupIdx++}`;
+      const isOpen = openGroupIds.has(gid) || (isFinal && !isDone && !openGroupIds.has(gid));
+      const actionCount = pendingActivities.filter((a) => a.type === 'action' || a.type === 'instruction').length;
+      const thoughtCount = pendingActivities.filter((a) => a.type === 'thought').length;
+
+      let summaryText = '';
+      if (actionCount > 0 && thoughtCount > 0) {
+        summaryText = `Thought & executed ${actionCount} action${actionCount > 1 ? 's' : ''}`;
+      } else if (actionCount > 0) {
+        summaryText = `Executed ${actionCount} action${actionCount > 1 ? 's' : ''}`;
+      } else {
+        summaryText = `Thought Process (${thoughtCount} step${thoughtCount > 1 ? 's' : ''})`;
+      }
+
+      let itemsHtml = '';
+      pendingActivities.forEach((ev) => {
+        if (ev.type === 'thought') {
+          const isThoughtOpen = openThoughtIds.has(ev.id);
+          itemsHtml += `
+            <div class="ag-thought-item ${isThoughtOpen ? 'is-open' : ''}" data-id="${escapeXml(ev.id)}">
+              <div class="ag-thought-header" onclick="toggleThoughtBlock(this.parentElement, event)">
+                <span>${escapeXml(ev.label)}</span>
+                <span class="ag-chevron">›</span>
+              </div>
+              <div class="ag-thought-body">${escapeXml(ev.text)}</div>
+            </div>
+          `;
+        } else if (ev.type === 'action' || ev.type === 'instruction') {
+          let diffHtml = '';
+          if (ev.diffAdd || ev.diffDel) {
+            diffHtml = `<span class="ag-diff">`;
+            if (ev.diffAdd) diffHtml += `<span class="ag-diff-add">+${ev.diffAdd}</span> `;
+            if (ev.diffDel) diffHtml += `<span class="ag-diff-del">-${ev.diffDel}</span>`;
+            diffHtml += `</span>`;
+          }
+
+          const badgeLabel = ev.badge?.label || '';
+          const badgeColor = ev.badge?.color || '#94a3b8';
+
+          itemsHtml += `
+            <div class="ag-action-item">
+              <span class="ag-verb">${escapeXml(ev.verb)}</span>
+              ${badgeLabel ? `<span class="ag-badge" style="color: ${badgeColor}">${escapeXml(badgeLabel)}</span>` : ''}
+              <span class="ag-target" title="${escapeXml(ev.target)}">${escapeXml(ev.target)}</span>
+              ${ev.details ? `<span class="ag-details">${escapeXml(ev.details)}</span>` : ''}
+              ${diffHtml}
+            </div>
+          `;
+        }
+      });
+
+      html += `
+        <div class="ag-activity-group ${isOpen ? 'is-open' : ''}" data-id="${gid}">
+          <div class="ag-activity-header" onclick="toggleActivityGroup(this.parentElement, event)">
+            <div class="ag-activity-summary">
+              <span style="color: #38bdf8; font-size: 11px;">⚡</span>
+              <span>${escapeXml(summaryText)}</span>
+              <span class="ag-activity-badge">${actionCount + thoughtCount} step${actionCount + thoughtCount > 1 ? 's' : ''}</span>
+            </div>
+            <span class="ag-activity-chevron">›</span>
+          </div>
+          <div class="ag-activity-body">
+            ${itemsHtml}
+          </div>
+        </div>
+      `;
+
+      pendingActivities = [];
+    }
 
     events.forEach((ev) => {
-      const timeStr = ev.timestamp
-        ? new Date(ev.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        : '';
-
       if (ev.type === 'user_message') {
+        flushActivities();
+        const timeStr = ev.timestamp
+          ? new Date(ev.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          : '';
         html += `
           <div class="chat-msg-user">
             <div class="msg-meta">
@@ -1084,6 +1190,10 @@ async function fetchExecutionSteps() {
           </div>
         `;
       } else if (ev.type === 'assistant_message') {
+        flushActivities();
+        const timeStr = ev.timestamp
+          ? new Date(ev.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          : '';
         const agentName = state.selectedId === 'root' ? 'Antigravity' : (sub?.role || 'Assistant');
         html += `
           <div class="chat-msg-assistant">
@@ -1095,40 +1205,12 @@ async function fetchExecutionSteps() {
             <div class="msg-text">${formatMessageText(ev.text)}</div>
           </div>
         `;
-      } else if (ev.type === 'thought') {
-        const isOpen = openIds.has(ev.id);
-        html += `
-          <div class="ag-thought-item ${isOpen ? 'is-open' : ''}" data-id="${escapeXml(ev.id)}">
-            <div class="ag-thought-header" onclick="toggleThoughtBlock(this.parentElement, event)">
-              <span>${escapeXml(ev.label)}</span>
-              <span class="ag-chevron">›</span>
-            </div>
-            <div class="ag-thought-body">${escapeXml(ev.text)}</div>
-          </div>
-        `;
-      } else if (ev.type === 'action' || ev.type === 'instruction') {
-        let diffHtml = '';
-        if (ev.diffAdd || ev.diffDel) {
-          diffHtml = `<span class="ag-diff">`;
-          if (ev.diffAdd) diffHtml += `<span class="ag-diff-add">+${ev.diffAdd}</span> `;
-          if (ev.diffDel) diffHtml += `<span class="ag-diff-del">-${ev.diffDel}</span>`;
-          diffHtml += `</span>`;
-        }
-
-        const badgeLabel = ev.badge?.label || '';
-        const badgeColor = ev.badge?.color || '#94a3b8';
-
-        html += `
-          <div class="ag-action-item">
-            <span class="ag-verb">${escapeXml(ev.verb)}</span>
-            ${badgeLabel ? `<span class="ag-badge" style="color: ${badgeColor}">${escapeXml(badgeLabel)}</span>` : ''}
-            <span class="ag-target" title="${escapeXml(ev.target)}">${escapeXml(ev.target)}</span>
-            ${ev.details ? `<span class="ag-details">${escapeXml(ev.details)}</span>` : ''}
-            ${diffHtml}
-          </div>
-        `;
+      } else {
+        pendingActivities.push(ev);
       }
     });
+
+    flushActivities(true);
 
     if (streamListEl) {
       const container = $('execution-log-container');
@@ -1140,7 +1222,6 @@ async function fetchExecutionSteps() {
     }
 
     // Determine working vs done status
-    const isDone = sub ? sub.state === 'done' : (state.mainAgent?.state === 'idle');
     if (statusFooter) {
       if (isDone) {
         statusFooter.classList.add('is-done');
