@@ -265,6 +265,12 @@ function computeSubtreeH(node, nodeH = 48, gapY = 10) {
   return node.subtreeH;
 }
 
+function truncateText(str, maxLen) {
+  if (!str) return '';
+  const s = String(str).trim();
+  return s.length > maxLen ? s.slice(0, maxLen - 1).trimEnd() + '…' : s;
+}
+
 function renderDAG() {
   const container = $('dag-container');
   if (!container) return;
@@ -275,20 +281,20 @@ function renderDAG() {
   const { roots, allNodes } = buildSubagentHierarchy(subagents);
   const hasChildren = allNodes.some((n) => n.children.length > 0);
 
-  const nodeW = 175;
-  const nodeH = 48;
-  const gapX = 55;
-  const gapY = 10;
+  const nodeW = 265;
+  const nodeH = 54;
+  const gapX = 58;
+  const gapY = 12;
   const startX = 185;
 
-  let totalCalculatedH = 30;
+  let totalCalculatedH = 36;
   if (hasChildren) {
     roots.forEach((r) => {
       computeSubtreeH(r, nodeH, gapY);
-      totalCalculatedH += r.subtreeH + 24;
+      totalCalculatedH += r.subtreeH + 34;
     });
   } else {
-    totalCalculatedH = Math.max(1, count) * 58 + 40;
+    totalCalculatedH = Math.max(1, count) * 62 + 40;
   }
 
   let maxDepth = 1;
@@ -300,7 +306,7 @@ function renderDAG() {
   };
   roots.forEach(checkMaxDepth);
 
-  const graphW = hasChildren ? Math.max(680, startX + maxDepth * (nodeW + gapX) + 40) : 440;
+  const graphW = hasChildren ? Math.max(760, startX + maxDepth * (nodeW + gapX) + 40) : 480;
   const graphH = Math.max(260, totalCalculatedH + 30);
 
   viewport.graphWidth = graphW;
@@ -398,7 +404,7 @@ function renderDAG() {
   `;
 
   if (hasChildren) {
-    let currentY = 20;
+    let currentY = 28;
     const visibleNodes = [];
 
     function layoutSubtree(node, topY) {
@@ -424,7 +430,7 @@ function renderDAG() {
     roots.forEach((r) => {
       r.familyTopY = currentY;
       layoutSubtree(r, currentY);
-      currentY += r.subtreeH + 24;
+      currentY += r.subtreeH + 34;
     });
 
     // 1. Render Family Grouping Boxes (behind cards and edges)
@@ -434,17 +440,17 @@ function renderDAG() {
       if (descendants.length > 0 && !isCollapsed) {
         const familyNodes = [r, ...descendants];
         const maxX = Math.max(...familyNodes.map((n) => n.x + nodeW));
-        const boxX = r.x - 8;
-        const boxY = (r.familyTopY !== undefined ? r.familyTopY : r.y) - 8;
-        const boxW = maxX - boxX + 8;
-        const boxH = r.subtreeH + 16;
+        const boxX = r.x - 10;
+        const boxY = (r.familyTopY !== undefined ? r.familyTopY : r.y) - 20;
+        const boxW = maxX - boxX + 10;
+        const boxH = r.subtreeH + 28;
         const totalFamilyMembers = countAllDescendants(r) + 1;
 
         svgInner += `
           <rect x="${boxX}" y="${boxY}" width="${boxW}" height="${boxH}" rx="8" 
                 fill="#131316" fill-opacity="0.8" stroke="#232328" stroke-width="1" stroke-dasharray="3,3" />
-          <text x="${boxX + 8}" y="${boxY + 11}" fill="#71717a" font-size="7.5" font-family="monospace">
-            Family: ${escapeXml(r.role)} (${totalFamilyMembers} subagents)
+          <text x="${boxX + 10}" y="${boxY + 12}" fill="#71717a" font-size="7.5" font-family="monospace">
+            Family: ${escapeXml(truncateText(r.role, 48))} (${totalFamilyMembers} subagents)
           </text>
         `;
       }
@@ -496,22 +502,23 @@ function renderDAG() {
 
       let statusBadge = '';
       if (colors.isWaiting) {
-        statusBadge = `<g><circle cx="${node.x + nodeW - 14}" cy="${node.y + 14}" r="5" fill="#f59e0b" /><text x="${node.x + nodeW - 14}" y="${node.y + 17}" font-size="8" fill="#000" font-weight="bold" text-anchor="middle">!</text></g>`;
+        statusBadge = `<g><circle cx="${node.x + nodeW - 14}" cy="${node.y + 15}" r="5" fill="#f59e0b" /><text x="${node.x + nodeW - 14}" y="${node.y + 18}" font-size="8" fill="#000" font-weight="bold" text-anchor="middle">!</text></g>`;
       } else if (colors.isRunning) {
-        statusBadge = `<circle cx="${node.x + nodeW - 14}" cy="${node.y + 14}" r="4" fill="#38bdf8" class="dot-pulse" />`;
+        statusBadge = `<circle cx="${node.x + nodeW - 14}" cy="${node.y + 15}" r="4" fill="#38bdf8" class="dot-pulse" />`;
       } else if (colors.isDone) {
-        statusBadge = `<g><circle cx="${node.x + nodeW - 14}" cy="${node.y + 14}" r="5" fill="#064e3b" stroke="#10b981" stroke-width="0.8" /><text x="${node.x + nodeW - 14}" y="${node.y + 17}" font-size="8" fill="#34d399" font-weight="bold" text-anchor="middle">✓</text></g>`;
+        statusBadge = `<g><circle cx="${node.x + nodeW - 14}" cy="${node.y + 15}" r="5" fill="#064e3b" stroke="#10b981" stroke-width="0.8" /><text x="${node.x + nodeW - 14}" y="${node.y + 18}" font-size="8" fill="#34d399" font-weight="bold" text-anchor="middle">✓</text></g>`;
       } else if (colors.isErrored) {
-        statusBadge = `<g><circle cx="${node.x + nodeW - 14}" cy="${node.y + 14}" r="5" fill="#4c0519" stroke="#f43f5e" stroke-width="0.8" /><text x="${node.x + nodeW - 14}" y="${node.y + 17}" font-size="8" fill="#fb7185" font-weight="bold" text-anchor="middle">✕</text></g>`;
+        statusBadge = `<g><circle cx="${node.x + nodeW - 14}" cy="${node.y + 15}" r="5" fill="#4c0519" stroke="#f43f5e" stroke-width="0.8" /><text x="${node.x + nodeW - 14}" y="${node.y + 18}" font-size="8" fill="#fb7185" font-weight="bold" text-anchor="middle">✕</text></g>`;
       }
 
+      const hasNodeChildren = node.children && node.children.length > 0;
       let collapseBtnSvg = '';
-      if (node.children && node.children.length > 0) {
+      if (hasNodeChildren) {
         const isCollapsed = state.collapsedParents.has(node.id);
         const arrow = isCollapsed ? '▸' : '▾';
         const childCount = node.children.length;
         const childLabel = childCount > 1 ? `${childCount} children` : `${childCount} child`;
-        const btnW = 60;
+        const btnW = 58;
         const btnH = 15;
         const btnX = node.x + nodeW - btnW - 8;
         const btnY = node.y + nodeH - btnH - 6;
@@ -527,14 +534,17 @@ function renderDAG() {
       }
 
       const modelName = getModelDisplay(node);
-      const subtext = modelName ? `${escapeXml(node.type)} • ${escapeXml(modelName)}` : escapeXml(node.type);
+      const rawSubtext = modelName ? `${node.type} • ${modelName}` : node.type;
+      const displayRole = truncateText(node.role, 46);
+      const displaySubtext = truncateText(rawSubtext, hasNodeChildren ? 33 : 48);
 
       svgInner += `
         <g style="cursor: pointer" onclick="window.selectNode('${escapeXml(node.id)}')">
+          <title>${escapeXml(node.role)} (${escapeXml(rawSubtext)})</title>
           <rect x="${node.x}" y="${node.y}" width="${nodeW}" height="${nodeH}" rx="8" fill="${colors.bgCol}" ${ring} />
           ${statusBadge}
-          <text x="${node.x + 12}" y="${node.y + 18}" fill="#f8fafc" font-size="9.5" font-weight="600" text-anchor="start">${escapeXml(node.role)}</text>
-          <text x="${node.x + 12}" y="${node.y + 32}" fill="#94a3b8" font-size="7.5" text-anchor="start">${subtext}</text>
+          <text x="${node.x + 12}" y="${node.y + 19}" fill="#f8fafc" font-size="9.5" font-weight="600" text-anchor="start">${escapeXml(displayRole)}</text>
+          <text x="${node.x + 12}" y="${node.y + 34}" fill="#94a3b8" font-size="7.5" text-anchor="start">${escapeXml(displaySubtext)}</text>
           ${collapseBtnSvg}
         </g>
       `;
@@ -544,15 +554,15 @@ function renderDAG() {
     // LAYOUT PLANO (3 Colunas: Root -> Subagentes -> Síntese)
     // -------------------------------------------------------------------------
     const midX = 195;
-    const midW = 210;
-    const midH = 50;
-    const joinX = 475;
+    const midW = 235;
+    const midH = 52;
+    const joinX = 495;
     const joinW = 120;
     const joinH = 56;
     const joinY = Math.max(20, (graphH - joinH) / 2);
 
     subagents.forEach((sub, idx) => {
-      const subY = 20 + idx * 58;
+      const subY = 20 + idx * 60;
       const colors = getNodeColors(sub);
       const edgeClass = colors.isRunning ? 'class="edge-flow"' : '';
 
@@ -567,28 +577,6 @@ function renderDAG() {
               stroke="${colors.strokeCol}" stroke-width="1.5" ${edgeClass} marker-end="${colors.marker}" />
       `;
 
-      // Linha Subagente -> Join Node
-      const outX = midX + midW;
-      const outY = subY + midH / 2;
-      const targetJoinX = joinX;
-      const targetJoinY = joinY + joinH / 2;
-
-      const joinStrokeCol = colors.isDone
-        ? '#10b981'
-        : colors.isWaiting
-        ? '#f59e0b'
-        : colors.isErrored
-        ? '#f43f5e'
-        : '#24314c';
-      const joinMarker = colors.isDone
-        ? 'url(#arr-green)'
-        : colors.isWaiting
-        ? 'url(#arr-amber)'
-        : colors.isErrored
-        ? 'url(#arr-rose)'
-        : 'url(#arr-gray)';
-      const joinDash = colors.isDone ? '' : 'stroke-dasharray="3,3"';
-
       // Caixa do Subagente
       const ringHighlight = colors.isSelected
         ? `stroke-width="2" stroke="#38bdf8"`
@@ -596,21 +584,24 @@ function renderDAG() {
 
       let subStatusBadge = '';
       if (colors.isWaiting) {
-        subStatusBadge = `<g><circle cx="${midX + midW - 14}" cy="${subY + 14}" r="5" fill="#f59e0b" /><text x="${midX + midW - 14}" y="${subY + 17}" font-size="8" fill="#000" font-weight="bold" text-anchor="middle">!</text></g>`;
+        subStatusBadge = `<g><circle cx="${midX + midW - 14}" cy="${subY + 15}" r="5" fill="#f59e0b" /><text x="${midX + midW - 14}" y="${subY + 18}" font-size="8" fill="#000" font-weight="bold" text-anchor="middle">!</text></g>`;
       } else if (colors.isRunning) {
-        subStatusBadge = `<circle cx="${midX + midW - 14}" cy="${subY + 14}" r="4" fill="#38bdf8" class="dot-pulse" />`;
+        subStatusBadge = `<circle cx="${midX + midW - 14}" cy="${subY + 15}" r="4" fill="#38bdf8" class="dot-pulse" />`;
       } else if (colors.isDone) {
-        subStatusBadge = `<g><circle cx="${midX + midW - 14}" cy="${subY + 14}" r="5" fill="#064e3b" stroke="#10b981" stroke-width="0.8" /><text x="${midX + midW - 14}" y="${subY + 17}" font-size="8" fill="#34d399" font-weight="bold" text-anchor="middle">✓</text></g>`;
+        subStatusBadge = `<g><circle cx="${midX + midW - 14}" cy="${subY + 15}" r="5" fill="#064e3b" stroke="#10b981" stroke-width="0.8" /><text x="${midX + midW - 14}" y="${subY + 18}" font-size="8" fill="#34d399" font-weight="bold" text-anchor="middle">✓</text></g>`;
       }
 
       const subModelName = getModelDisplay(sub);
-      const subSubtext = subModelName ? `${escapeXml(sub.type)} • ${escapeXml(subModelName)}` : escapeXml(sub.type);
+      const rawSubtext = subModelName ? `${sub.type} • ${subModelName}` : sub.type;
+      const displayRole = truncateText(sub.role, 35);
+      const displaySubtext = truncateText(rawSubtext, 40);
       svgInner += `
         <g style="cursor: pointer" onclick="window.selectNode('${sub.id}')">
+          <title>${escapeXml(sub.role)} (${escapeXml(rawSubtext)})</title>
           <rect x="${midX}" y="${subY}" width="${midW}" height="${midH}" rx="8" fill="${colors.bgCol}" ${ringHighlight} />
           ${subStatusBadge}
-          <text x="${midX + 12}" y="${subY + 20}" fill="#f8fafc" font-size="10" font-weight="600" text-anchor="start">${escapeXml(sub.role)}</text>
-          <text x="${midX + 12}" y="${subY + 34}" fill="#94a3b8" font-size="8" text-anchor="start">${subSubtext}</text>
+          <text x="${midX + 12}" y="${subY + 20}" fill="#f8fafc" font-size="10" font-weight="600" text-anchor="start">${escapeXml(displayRole)}</text>
+          <text x="${midX + 12}" y="${subY + 35}" fill="#94a3b8" font-size="8" text-anchor="start">${escapeXml(displaySubtext)}</text>
         </g>
       `;
     });

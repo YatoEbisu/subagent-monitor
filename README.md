@@ -2,6 +2,8 @@
 
 A real-time **Mission Control** UI plugin for **Google Antigravity** that visualizes active subagents, nested hierarchies, approval states, and live conversation/execution streams in an interactive DAG (Directed Acyclic Graph).
 
+![Subagent Mission Control Preview](assets/screenshot.png)
+
 ---
 
 ## ✨ Features
