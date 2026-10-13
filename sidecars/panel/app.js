@@ -33,8 +33,13 @@ window.expandAllParents = () => {
 };
 
 window.collapseAllParents = () => {
-  const parents = (state.subagents || []).filter((s) => !s.parentId);
-  parents.forEach((p) => state.collapsedParents.add(p.id));
+  state.collapsedParents.clear();
+  const { allNodes } = buildSubagentHierarchy(state.subagents || []);
+  allNodes.forEach((n) => {
+    if (n.children && n.children.length > 0) {
+      state.collapsedParents.add(n.id);
+    }
+  });
   renderDAG();
   renderSidebar();
 };
@@ -163,6 +168,103 @@ function getNodeColors(sub) {
   return { strokeCol, bgCol, marker, badgeBg, badgeFg, badgeText, isSelected, isRunning, isDone, isErrored, isWaiting };
 }
 
+// ---------------------------------------------------------------------------
+// Hierarchical Tree Helpers
+// ---------------------------------------------------------------------------
+
+function buildSubagentHierarchy(subagents) {
+  const nodes = subagents.map((s) => ({
+    ...s,
+    children: [],
+    parent: null,
+    depth: 1,
+    x: 0,
+    y: 0,
+    subtreeH: 0
+  }));
+
+  const byId = new Map();
+  const byRole = new Map();
+  const byConvId = new Map();
+
+  nodes.forEach((n) => {
+    byId.set(n.id, n);
+    if (n.role) byRole.set(n.role, n);
+    if (n.conversationId) byConvId.set(n.conversationId, n);
+  });
+
+  function isAncestor(potentialAncestor, node) {
+    let curr = potentialAncestor;
+    while (curr) {
+      if (curr === node) return true;
+      curr = curr.parent;
+    }
+    return false;
+  }
+
+  const roots = [];
+  nodes.forEach((n) => {
+    if (!n.parentId || n.parentId === 'root') {
+      roots.push(n);
+    } else {
+      const parent = byId.get(n.parentId) || byRole.get(n.parentId) || byConvId.get(n.parentId);
+      if (parent && parent !== n && !isAncestor(parent, n)) {
+        parent.children.push(n);
+        n.parent = parent;
+      } else {
+        roots.push(n);
+      }
+    }
+  });
+
+  function assignDepth(node, depth) {
+    node.depth = depth;
+    node.children.forEach((c) => assignDepth(c, depth + 1));
+  }
+  roots.forEach((r) => assignDepth(r, 1));
+
+  return { roots, allNodes: nodes };
+}
+
+function countAllDescendants(node) {
+  let count = 0;
+  if (node.children) {
+    count += node.children.length;
+    node.children.forEach((c) => {
+      count += countAllDescendants(c);
+    });
+  }
+  return count;
+}
+
+function getVisibleDescendants(node) {
+  const list = [];
+  if (!state.collapsedParents.has(node.id) && node.children) {
+    node.children.forEach((c) => {
+      list.push(c);
+      list.push(...getVisibleDescendants(c));
+    });
+  }
+  return list;
+}
+
+function computeSubtreeH(node, nodeH = 48, gapY = 10) {
+  const isCollapsed = state.collapsedParents.has(node.id);
+  const visibleChildren = isCollapsed ? [] : node.children;
+  if (!visibleChildren || visibleChildren.length === 0) {
+    node.subtreeH = nodeH;
+    return node.subtreeH;
+  }
+  let totalH = 0;
+  visibleChildren.forEach((c, idx) => {
+    const chH = computeSubtreeH(c, nodeH, gapY);
+    totalH += chH;
+    if (idx > 0) totalH += gapY;
+  });
+  node.subtreeH = Math.max(nodeH, totalH);
+  return node.subtreeH;
+}
+
 function renderDAG() {
   const container = $('dag-container');
   if (!container) return;
@@ -170,48 +272,35 @@ function renderDAG() {
   const subagents = state.subagents || [];
   const count = subagents.length;
 
-  const hasChildren = subagents.some((s) => !!s.parentId);
-  const parents = hasChildren ? subagents.filter((s) => !s.parentId) : subagents;
-  const children = hasChildren ? subagents.filter((s) => !!s.parentId) : [];
+  const { roots, allNodes } = buildSubagentHierarchy(subagents);
+  const hasChildren = allNodes.some((n) => n.children.length > 0);
 
-  // Mapear filhos de cada pai
-  const childrenByParent = new Map();
-  parents.forEach((p) => childrenByParent.set(p.id, []));
-  children.forEach((c) => {
-    let p = parents.find(
-      (parent) =>
-        parent.id === c.parentId ||
-        parent.role === c.parentId ||
-        (parent.conversationId && parent.conversationId === c.parentId)
-    );
-    if (!p && parents.length > 0) p = parents[0];
-    if (p) {
-      if (!childrenByParent.has(p.id)) childrenByParent.set(p.id, []);
-      childrenByParent.get(p.id).push(c);
-    }
-  });
+  const nodeW = 175;
+  const nodeH = 48;
+  const gapX = 55;
+  const gapY = 10;
+  const startX = 185;
 
-  // Calcular dimensões do grafo somando as alturas de cada família
-  const pH = 48;
-  const cH = 46;
-  const childGap = 8;
   let totalCalculatedH = 30;
-
   if (hasChildren) {
-    parents.forEach((p) => {
-      const pChildren = childrenByParent.get(p.id) || [];
-      const isCollapsed = state.collapsedParents.has(p.id);
-      const famH =
-        isCollapsed || pChildren.length === 0
-          ? pH
-          : Math.max(pH, pChildren.length * cH + (pChildren.length - 1) * childGap);
-      totalCalculatedH += famH + 20;
+    roots.forEach((r) => {
+      computeSubtreeH(r, nodeH, gapY);
+      totalCalculatedH += r.subtreeH + 24;
     });
   } else {
     totalCalculatedH = Math.max(1, count) * 58 + 40;
   }
 
-  const graphW = hasChildren ? 660 : 440;
+  let maxDepth = 1;
+  const checkMaxDepth = (node) => {
+    if (node.depth > maxDepth) maxDepth = node.depth;
+    if (!state.collapsedParents.has(node.id) && node.children) {
+      node.children.forEach(checkMaxDepth);
+    }
+  };
+  roots.forEach(checkMaxDepth);
+
+  const graphW = hasChildren ? Math.max(680, startX + maxDepth * (nodeW + gapX) + 40) : 440;
   const graphH = Math.max(260, totalCalculatedH + 30);
 
   viewport.graphWidth = graphW;
@@ -309,83 +398,126 @@ function renderDAG() {
   `;
 
   if (hasChildren) {
-    // -------------------------------------------------------------------------
-    // CLUSTERED TREE LAYOUT (Families: Parent + Children aligned horizontally)
-    // -------------------------------------------------------------------------
-    const pX = 220;
-    const pW = 175;
-    const cX = 445;
-    const cW = 170;
-
     let currentY = 20;
+    const visibleNodes = [];
 
-    parents.forEach((p) => {
-      const pChildren = childrenByParent.get(p.id) || [];
-      const numChildren = pChildren.length;
-      const isCollapsed = state.collapsedParents.has(p.id);
-      const famH =
-        isCollapsed || numChildren === 0
-          ? pH
-          : Math.max(pH, numChildren * cH + (numChildren - 1) * childGap);
+    function layoutSubtree(node, topY) {
+      visibleNodes.push(node);
+      node.x = startX + (node.depth - 1) * (nodeW + gapX);
+      const isCollapsed = state.collapsedParents.has(node.id);
+      const visibleChildren = isCollapsed ? [] : node.children;
+      if (!visibleChildren || visibleChildren.length === 0) {
+        node.y = topY;
+        return;
+      }
+      let childY = topY;
+      visibleChildren.forEach((c, idx) => {
+        if (idx > 0) childY += gapY;
+        layoutSubtree(c, childY);
+        childY += c.subtreeH;
+      });
+      const first = visibleChildren[0];
+      const last = visibleChildren[visibleChildren.length - 1];
+      node.y = (first.y + last.y) / 2;
+    }
 
-      // Family Visual Grouping Box (when expanded and with children)
-      if (numChildren > 0 && !isCollapsed) {
-        const boxX = pX - 6;
-        const boxY = currentY - 6;
-        const boxW = cX + cW - boxX + 6;
-        const boxH = famH + 12;
+    roots.forEach((r) => {
+      r.familyTopY = currentY;
+      layoutSubtree(r, currentY);
+      currentY += r.subtreeH + 24;
+    });
+
+    // 1. Render Family Grouping Boxes (behind cards and edges)
+    roots.forEach((r) => {
+      const isCollapsed = state.collapsedParents.has(r.id);
+      const descendants = getVisibleDescendants(r);
+      if (descendants.length > 0 && !isCollapsed) {
+        const familyNodes = [r, ...descendants];
+        const maxX = Math.max(...familyNodes.map((n) => n.x + nodeW));
+        const boxX = r.x - 8;
+        const boxY = (r.familyTopY !== undefined ? r.familyTopY : r.y) - 8;
+        const boxW = maxX - boxX + 8;
+        const boxH = r.subtreeH + 16;
+        const totalFamilyMembers = countAllDescendants(r) + 1;
 
         svgInner += `
           <rect x="${boxX}" y="${boxY}" width="${boxW}" height="${boxH}" rx="8" 
                 fill="#131316" fill-opacity="0.8" stroke="#232328" stroke-width="1" stroke-dasharray="3,3" />
-          <text x="${boxX + 8}" y="${boxY + 10}" fill="#71717a" font-size="7.5" font-family="monospace">
-            Family: ${escapeXml(p.role)} (${numChildren} child${numChildren > 1 ? 'ren' : ''})
+          <text x="${boxX + 8}" y="${boxY + 11}" fill="#71717a" font-size="7.5" font-family="monospace">
+            Family: ${escapeXml(r.role)} (${totalFamilyMembers} subagents)
           </text>
         `;
       }
+    });
 
-      // Posição do Pai: centralizado verticalmente em relação aos seus próprios filhos!
-      const pY = currentY + (famH - pH) / 2;
-      const pColors = getNodeColors(p);
-      const pEdgeClass = pColors.isRunning ? 'class="edge-flow"' : '';
-
-      // Linha Raiz -> Pai
-      const rootFromX = rootX + rootW;
-      const rootFromY = rootY + rootH / 2;
-      const pToX = pX;
-      const pToY = pY + pH / 2;
+    // 2. Render Edges: Main Agent -> Roots
+    const rootFromX = rootX + rootW;
+    const rootFromY = rootY + rootH / 2;
+    roots.forEach((r) => {
+      const rColors = getNodeColors(r);
+      const rEdgeClass = rColors.isRunning ? 'class="edge-flow"' : '';
+      const toX = r.x;
+      const toY = r.y + nodeH / 2;
 
       svgInner += `
-        <path d="M ${rootFromX} ${rootFromY} C ${rootFromX + 50} ${rootFromY}, ${pToX - 50} ${pToY}, ${pToX} ${pToY}" 
-              stroke="${pColors.strokeCol}" stroke-width="1.5" ${pEdgeClass} marker-end="${pColors.marker}" />
+        <path d="M ${rootFromX} ${rootFromY} C ${rootFromX + 45} ${rootFromY}, ${toX - 45} ${toY}, ${toX} ${toY}" 
+              stroke="${rColors.strokeCol}" stroke-width="1.5" ${rEdgeClass} marker-end="${rColors.marker}" />
       `;
+    });
 
-      // Card do Pai
-      const pRing = pColors.isSelected
+    // 3. Render Edges: Parent -> Direct Child
+    visibleNodes.forEach((node) => {
+      const isCollapsed = state.collapsedParents.has(node.id);
+      if (!isCollapsed && node.children && node.children.length > 0) {
+        node.children.forEach((c) => {
+          if (visibleNodes.includes(c)) {
+            const fromX = node.x + nodeW;
+            const fromY = node.y + nodeH / 2;
+            const toX = c.x;
+            const toY = c.y + nodeH / 2;
+            const cColors = getNodeColors(c);
+            const cEdgeClass = cColors.isRunning ? 'class="edge-flow"' : '';
+
+            svgInner += `
+              <path d="M ${fromX} ${fromY} C ${fromX + 30} ${fromY}, ${toX - 30} ${toY}, ${toX} ${toY}" 
+                    stroke="${cColors.strokeCol}" stroke-width="1.5" ${cEdgeClass} marker-end="${cColors.marker}" />
+            `;
+          }
+        });
+      }
+    });
+
+    // 4. Render Nodes (Cards)
+    visibleNodes.forEach((node) => {
+      const colors = getNodeColors(node);
+      const ring = colors.isSelected
         ? `stroke-width="2" stroke="#38bdf8"`
-        : `stroke="${pColors.strokeCol}" stroke-width="1.2"`;
+        : `stroke="${colors.strokeCol}" stroke-width="1.2"`;
 
-      // Status indicator no canto superior direito
-      let pStatusBadge = '';
-      if (pColors.isWaiting) {
-        pStatusBadge = `<g><circle cx="${pX + pW - 14}" cy="${pY + 14}" r="5" fill="#f59e0b" /><text x="${pX + pW - 14}" y="${pY + 17}" font-size="8" fill="#000" font-weight="bold" text-anchor="middle">!</text></g>`;
-      } else if (pColors.isRunning) {
-        pStatusBadge = `<circle cx="${pX + pW - 14}" cy="${pY + 14}" r="4" fill="#38bdf8" class="dot-pulse" />`;
-      } else if (pColors.isDone) {
-        pStatusBadge = `<g><circle cx="${pX + pW - 14}" cy="${pY + 14}" r="5" fill="#064e3b" stroke="#10b981" stroke-width="0.8" /><text x="${pX + pW - 14}" y="${pY + 17}" font-size="8" fill="#34d399" font-weight="bold" text-anchor="middle">✓</text></g>`;
+      let statusBadge = '';
+      if (colors.isWaiting) {
+        statusBadge = `<g><circle cx="${node.x + nodeW - 14}" cy="${node.y + 14}" r="5" fill="#f59e0b" /><text x="${node.x + nodeW - 14}" y="${node.y + 17}" font-size="8" fill="#000" font-weight="bold" text-anchor="middle">!</text></g>`;
+      } else if (colors.isRunning) {
+        statusBadge = `<circle cx="${node.x + nodeW - 14}" cy="${node.y + 14}" r="4" fill="#38bdf8" class="dot-pulse" />`;
+      } else if (colors.isDone) {
+        statusBadge = `<g><circle cx="${node.x + nodeW - 14}" cy="${node.y + 14}" r="5" fill="#064e3b" stroke="#10b981" stroke-width="0.8" /><text x="${node.x + nodeW - 14}" y="${node.y + 17}" font-size="8" fill="#34d399" font-weight="bold" text-anchor="middle">✓</text></g>`;
+      } else if (colors.isErrored) {
+        statusBadge = `<g><circle cx="${node.x + nodeW - 14}" cy="${node.y + 14}" r="5" fill="#4c0519" stroke="#f43f5e" stroke-width="0.8" /><text x="${node.x + nodeW - 14}" y="${node.y + 17}" font-size="8" fill="#fb7185" font-weight="bold" text-anchor="middle">✕</text></g>`;
       }
 
-      // Botão interativo de Colapso / Contagem de Filhos no canto inferior direito
       let collapseBtnSvg = '';
-      if (numChildren > 0) {
+      if (node.children && node.children.length > 0) {
+        const isCollapsed = state.collapsedParents.has(node.id);
+        const arrow = isCollapsed ? '▸' : '▾';
+        const childCount = node.children.length;
+        const childLabel = childCount > 1 ? `${childCount} children` : `${childCount} child`;
         const btnW = 60;
         const btnH = 15;
-        const btnX = pX + pW - btnW - 8;
-        const btnY = pY + pH - btnH - 6;
-        const arrow = isCollapsed ? '▸' : '▾';
-        const childLabel = numChildren > 1 ? `${numChildren} children` : `${numChildren} child`;
+        const btnX = node.x + nodeW - btnW - 8;
+        const btnY = node.y + nodeH - btnH - 6;
+
         collapseBtnSvg = `
-          <g style="cursor: pointer" onclick="window.toggleParentCollapse('${p.id}', event)">
+          <g style="cursor: pointer" onclick="window.toggleParentCollapse('${escapeXml(node.id)}', event)">
             <rect x="${btnX}" y="${btnY}" width="${btnW}" height="${btnH}" rx="3" fill="#222227" stroke="#32323a" stroke-width="0.8" />
             <text x="${btnX + btnW / 2}" y="${btnY + 10.5}" fill="#d4d4d8" font-size="7.5" font-weight="600" text-anchor="middle">
               ${arrow} ${childLabel}
@@ -394,60 +526,18 @@ function renderDAG() {
         `;
       }
 
+      const modelName = getModelDisplay(node);
+      const subtext = modelName ? `${escapeXml(node.type)} • ${escapeXml(modelName)}` : escapeXml(node.type);
+
       svgInner += `
-        <g style="cursor: pointer" onclick="window.selectNode('${p.id}')">
-          <rect x="${pX}" y="${pY}" width="${pW}" height="${pH}" rx="8" fill="${pColors.bgCol}" ${pRing} />
-          ${pStatusBadge}
-          <text x="${pX + 12}" y="${pY + 18}" fill="#f8fafc" font-size="10" font-weight="600" text-anchor="start">${escapeXml(p.role)}</text>
-          <text x="${pX + 12}" y="${pY + 32}" fill="#94a3b8" font-size="8.5" text-anchor="start">${escapeXml(p.type)}</text>
+        <g style="cursor: pointer" onclick="window.selectNode('${escapeXml(node.id)}')">
+          <rect x="${node.x}" y="${node.y}" width="${nodeW}" height="${nodeH}" rx="8" fill="${colors.bgCol}" ${ring} />
+          ${statusBadge}
+          <text x="${node.x + 12}" y="${node.y + 18}" fill="#f8fafc" font-size="9.5" font-weight="600" text-anchor="start">${escapeXml(node.role)}</text>
+          <text x="${node.x + 12}" y="${node.y + 32}" fill="#94a3b8" font-size="7.5" text-anchor="start">${subtext}</text>
           ${collapseBtnSvg}
         </g>
       `;
-
-      // Renderizar filhos deste pai no cluster da família (se houver e não estiver recolhido)
-      if (numChildren > 0 && !isCollapsed) {
-        pChildren.forEach((c, cIdx) => {
-          const cY = currentY + cIdx * (cH + childGap);
-          const cColors = getNodeColors(c);
-          const cEdgeClass = cColors.isRunning ? 'class="edge-flow"' : '';
-
-          // Linha Pai -> Filho (Local, horizontal e sem cruzamento com outros pais)
-          const fromX = pX + pW;
-          const fromY = pY + pH / 2;
-          const toX = cX;
-          const toY = cY + cH / 2;
-
-          svgInner += `
-            <path d="M ${fromX} ${fromY} C ${fromX + 30} ${fromY}, ${toX - 30} ${toY}, ${toX} ${toY}" 
-                  stroke="${cColors.strokeCol}" stroke-width="1.5" ${cEdgeClass} marker-end="${cColors.marker}" />
-          `;
-
-          // Card do Filho
-          const cRing = cColors.isSelected
-            ? `stroke-width="2" stroke="#38bdf8"`
-            : `stroke="${cColors.strokeCol}" stroke-width="1.2"`;
-
-          let cStatusBadge = '';
-          if (cColors.isWaiting) {
-            cStatusBadge = `<g><circle cx="${cX + cW - 14}" cy="${cY + 14}" r="5" fill="#f59e0b" /><text x="${cX + cW - 14}" y="${cY + 17}" font-size="8" fill="#000" font-weight="bold" text-anchor="middle">!</text></g>`;
-          } else if (cColors.isRunning) {
-            cStatusBadge = `<circle cx="${cX + cW - 14}" cy="${cY + 14}" r="4" fill="#38bdf8" class="dot-pulse" />`;
-          } else if (cColors.isDone) {
-            cStatusBadge = `<g><circle cx="${cX + cW - 14}" cy="${cY + 14}" r="5" fill="#064e3b" stroke="#10b981" stroke-width="0.8" /><text x="${cX + cW - 14}" y="${cY + 17}" font-size="8" fill="#34d399" font-weight="bold" text-anchor="middle">✓</text></g>`;
-          }
-
-          svgInner += `
-            <g style="cursor: pointer" onclick="window.selectNode('${c.id}')">
-              <rect x="${cX}" y="${cY}" width="${cW}" height="${cH}" rx="8" fill="${cColors.bgCol}" ${cRing} />
-              ${cStatusBadge}
-              <text x="${cX + 12}" y="${cY + 18}" fill="#f8fafc" font-size="9.5" font-weight="600" text-anchor="start">${escapeXml(c.role)}</text>
-              <text x="${cX + 12}" y="${cY + 32}" fill="#94a3b8" font-size="8" text-anchor="start">${escapeXml(c.type)}</text>
-            </g>
-          `;
-        });
-      }
-
-      currentY += famH + 20;
     });
   } else {
     // -------------------------------------------------------------------------
@@ -513,12 +603,14 @@ function renderDAG() {
         subStatusBadge = `<g><circle cx="${midX + midW - 14}" cy="${subY + 14}" r="5" fill="#064e3b" stroke="#10b981" stroke-width="0.8" /><text x="${midX + midW - 14}" y="${subY + 17}" font-size="8" fill="#34d399" font-weight="bold" text-anchor="middle">✓</text></g>`;
       }
 
+      const subModelName = getModelDisplay(sub);
+      const subSubtext = subModelName ? `${escapeXml(sub.type)} • ${escapeXml(subModelName)}` : escapeXml(sub.type);
       svgInner += `
         <g style="cursor: pointer" onclick="window.selectNode('${sub.id}')">
           <rect x="${midX}" y="${subY}" width="${midW}" height="${midH}" rx="8" fill="${colors.bgCol}" ${ringHighlight} />
           ${subStatusBadge}
           <text x="${midX + 12}" y="${subY + 20}" fill="#f8fafc" font-size="10" font-weight="600" text-anchor="start">${escapeXml(sub.role)}</text>
-          <text x="${midX + 12}" y="${subY + 34}" fill="#94a3b8" font-size="8.5" text-anchor="start">${escapeXml(sub.type)}</text>
+          <text x="${midX + 12}" y="${subY + 34}" fill="#94a3b8" font-size="8" text-anchor="start">${subSubtext}</text>
         </g>
       `;
     });
@@ -597,9 +689,88 @@ function setupPanZoomEvents() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Renderização da Barra Lateral (Lista)
-// ---------------------------------------------------------------------------
+function getModelDisplay(sub) {
+  if (!sub) return '';
+  const m = String(sub.effectiveModel || sub.model || state.mainAgent?.model || '').trim();
+  if (!m || m.toLowerCase() === 'inherit') return '';
+  return m;
+}
+
+function renderSidebarNode(node, depth = 1) {
+  const isSelected = state.selectedId === node.id;
+  const colors = getNodeColors(node);
+  const isCollapsed = state.collapsedParents.has(node.id);
+  const numChildren = node.children ? node.children.length : 0;
+
+  let dotPulse = '';
+  if (colors.isWaiting) {
+    dotPulse = '<span style="font-size: 10px;">⚠️</span>';
+  } else if (colors.isRunning) {
+    dotPulse = '<span class="live-dot dot-pulse" style="width: 5px; height: 5px; background: #38bdf8;"></span>';
+  } else if (colors.isDone) {
+    dotPulse = '<span class="live-dot" style="width: 5px; height: 5px; background: #10b981;"></span>';
+  } else if (colors.isErrored) {
+    dotPulse = '<span style="color: #f43f5e; font-size: 9px;">✕</span>';
+  }
+
+  const detailText = node.stateDetail || node.lastTool || 'active';
+  const modelName = getModelDisplay(node);
+  const modelBottom = modelName
+    ? `<div class="card-bottom"${depth > 1 ? ' style="font-size: 9px; padding-left: 14px;"' : ''}><span class="model-full-name" title="Modelo: ${escapeXml(modelName)}">${escapeXml(modelName)}</span></div>`
+    : '';
+
+  let childToggleBtn = '';
+  if (numChildren > 0) {
+    const arrow = isCollapsed ? '▶' : '▼';
+    const labelText = isCollapsed ? 'Expand' : 'Collapse';
+    const childLabel = numChildren > 1 ? `${numChildren} children` : `${numChildren} child`;
+    childToggleBtn = `
+      <button class="child-count-pill" title="${labelText} ${childLabel}" onclick="window.toggleParentCollapse('${escapeXml(node.id)}', event)">
+        <span class="pill-arrow">${arrow}</span>
+        <span>${childLabel}</span>
+      </button>
+    `;
+  }
+
+  const isRootLevel = depth === 1;
+  const cardClass = isRootLevel ? 'subagent-card' : 'child-subagent-card';
+  const prefix = isRootLevel
+    ? ''
+    : `<span style="color: #475569; font-family: monospace; font-size: 10px; margin-right: 2px;">└─</span>`;
+
+  let nodeHtml = `
+    <div class="${cardClass} ${isSelected ? 'active' : ''} ${colors.isWaiting ? 'waiting' : ''}" onclick="window.selectNode('${escapeXml(node.id)}')">
+      <div class="card-top">
+        <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+          ${prefix}
+          ${dotPulse}
+          <span class="agent-role" onclick="${numChildren > 0 ? `window.toggleParentCollapse('${escapeXml(node.id)}', event)` : 'null'}" style="${numChildren > 0 ? 'cursor: pointer;' : ''}; ${!isRootLevel ? 'font-size: 11px;' : ''}">
+            ${escapeXml(node.role)}
+          </span>
+          <span style="font-family: monospace; font-size: 8.5px; padding: 1px 4px; border-radius: 3px; background: #202025; color: #a1a1aa; flex-shrink: 0; border: 1px solid #2b2b32;">
+            ${escapeXml(node.type)}
+          </span>
+        </div>
+        ${childToggleBtn}
+      </div>
+      <div class="agent-action" style="${!isRootLevel ? 'font-size: 9.5px; padding-left: 14px;' : ''}">
+        ${escapeXml(detailText)}
+      </div>
+      ${modelBottom}
+    </div>
+  `;
+
+  // Render children recursively if not collapsed
+  if (numChildren > 0 && !isCollapsed) {
+    nodeHtml += `<div class="child-subagents-container">`;
+    node.children.forEach((c) => {
+      nodeHtml += renderSidebarNode(c, depth + 1);
+    });
+    nodeHtml += `</div>`;
+  }
+
+  return nodeHtml;
+}
 
 function renderSidebar() {
   const listEl = $('subagents-list');
@@ -651,15 +822,14 @@ function renderSidebar() {
     `;
   }
 
-  const hasChildren = subagents.some((s) => !!s.parentId);
-  const parents = hasChildren ? subagents.filter((s) => !s.parentId) : subagents;
-  const children = hasChildren ? subagents.filter((s) => !!s.parentId) : [];
+  const { roots, allNodes } = buildSubagentHierarchy(subagents);
+  const hasChildren = allNodes.some((n) => n.children.length > 0);
 
   if (hasChildren) {
     // Controls bar for expansion / counts
     html += `
       <div class="sidebar-controls-bar">
-        <span class="sidebar-count-label">${parents.length} Families (${subagents.length} Total)</span>
+        <span class="sidebar-count-label">${roots.length} Families (${subagents.length} Total)</span>
         <div class="sidebar-btn-group">
           <button class="mini-btn" onclick="window.expandAllParents()">Expand All</button>
           <button class="mini-btn" onclick="window.collapseAllParents()">Collapse All</button>
@@ -667,146 +837,8 @@ function renderSidebar() {
       </div>
     `;
 
-    // Map children for each parent
-    const childrenByParent = new Map();
-    parents.forEach((p) => childrenByParent.set(p.id, []));
-    children.forEach((c) => {
-      let p = parents.find(
-        (parent) =>
-          parent.id === c.parentId ||
-          parent.role === c.parentId ||
-          (parent.conversationId && parent.conversationId === c.parentId)
-      );
-      if (!p && parents.length > 0) p = parents[0];
-      if (p) {
-        if (!childrenByParent.has(p.id)) childrenByParent.set(p.id, []);
-        childrenByParent.get(p.id).push(c);
-      }
-    });
-
-    parents.forEach((p) => {
-      const pChildren = childrenByParent.get(p.id) || [];
-      const numChildren = pChildren.length;
-      const isCollapsed = state.collapsedParents.has(p.id);
-      const isSelected = state.selectedId === p.id;
-      const colors = getNodeColors(p);
-
-      let statusText = colors.badgeText;
-      let statusColor = colors.badgeFg;
-      let dotPulse = '';
-
-      if (colors.isWaiting) {
-        statusText = 'REQUIRES APPROVAL';
-        statusColor = '#f59e0b';
-        dotPulse = '<span class="live-dot dot-pulse" style="width: 5px; height: 5px; background: #f59e0b;"></span> <span style="font-size: 10px;">⚠️</span>';
-      } else if (colors.isRunning) {
-        statusText = 'RUNNING';
-        statusColor = '#38bdf8';
-        dotPulse = '<span class="live-dot dot-pulse" style="width: 5px; height: 5px; background: #38bdf8;"></span>';
-      } else if (colors.isDone) {
-        statusText = 'COMPLETED';
-        statusColor = '#10b981';
-        dotPulse = '<span style="color: #10b981;">✓</span>';
-      } else if (colors.isErrored) {
-        statusText = 'ERROR';
-        statusColor = '#f43f5e';
-        dotPulse = '<span style="color: #f43f5e;">✕</span>';
-      }
-
-      const detailText = p.stateDetail || p.lastTool || 'active';
-
-      let childToggleBtn = '';
-      if (numChildren > 0) {
-        const arrow = isCollapsed ? '▶' : '▼';
-        const labelText = isCollapsed ? 'Expand' : 'Collapse';
-        const childLabel = numChildren > 1 ? `${numChildren} children` : `${numChildren} child`;
-        childToggleBtn = `
-          <button class="child-count-pill" title="${labelText} ${childLabel}" onclick="window.toggleParentCollapse('${p.id}', event)">
-            <span class="pill-arrow">${arrow}</span>
-            <span>${childLabel}</span>
-          </button>
-        `;
-      }
-
-      html += `
-        <div class="subagent-card ${isSelected ? 'active' : ''} ${colors.isWaiting ? 'waiting' : ''}" onclick="window.selectNode('${p.id}')">
-          <div class="card-top">
-            <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
-              ${dotPulse}
-              <span class="agent-role" onclick="numChildren > 0 ? window.toggleParentCollapse('${p.id}', event) : null" style="${numChildren > 0 ? 'cursor: pointer;' : ''}">
-                ${escapeXml(p.role)}
-              </span>
-              <span style="font-family: monospace; font-size: 8.5px; padding: 1px 4px; border-radius: 3px; background: #202025; color: #a1a1aa; flex-shrink: 0; border: 1px solid #2b2b32;">
-                ${escapeXml(p.type)}
-              </span>
-            </div>
-            ${childToggleBtn}
-          </div>
-          <div class="agent-action">
-            ${escapeXml(detailText)}
-          </div>
-          <div class="card-bottom">
-            <span>${escapeXml(p.model || 'inherit')}</span>
-            <span style="color: ${statusColor}; font-weight: 600;">${colors.isDone ? '✓' : statusText}</span>
-          </div>
-        </div>
-      `;
-
-      // Renderizar filhos aninhados logo abaixo do Pai
-      if (numChildren > 0 && !isCollapsed) {
-        html += `<div class="child-subagents-container">`;
-        pChildren.forEach((c) => {
-          const cSelected = state.selectedId === c.id;
-          const cColors = getNodeColors(c);
-
-          let cStatusText = cColors.badgeText;
-          let cStatusColor = cColors.badgeFg;
-          let cDotPulse = '';
-
-          if (cColors.isWaiting) {
-            cStatusText = 'REQUIRES APPROVAL';
-            cStatusColor = '#f59e0b';
-            cDotPulse = '<span style="font-size: 10px;">⚠️</span>';
-          } else if (cColors.isRunning) {
-            cStatusText = 'RUNNING';
-            cStatusColor = '#38bdf8';
-            cDotPulse = '<span class="live-dot dot-pulse" style="width: 4px; height: 4px; background: #38bdf8;"></span>';
-          } else if (cColors.isDone) {
-            cStatusText = 'COMPLETED';
-            cStatusColor = '#10b981';
-            cDotPulse = '<span style="color: #10b981; font-size: 9px;">✓</span>';
-          } else if (cColors.isErrored) {
-            cStatusText = 'ERROR';
-            cStatusColor = '#f43f5e';
-            cDotPulse = '<span style="color: #f43f5e; font-size: 9px;">✕</span>';
-          }
-
-          const cDetailText = c.stateDetail || c.lastTool || 'active';
-
-          html += `
-            <div class="child-subagent-card ${cSelected ? 'active' : ''} ${cColors.isWaiting ? 'waiting' : ''}" onclick="window.selectNode('${c.id}')">
-              <div class="card-top">
-                <span class="agent-role" style="font-size: 11px;">
-                  <span style="color: #475569; font-family: monospace;">└─</span>
-                  ${cDotPulse}
-                  <span>${escapeXml(c.role)}</span>
-                </span>
-                <span style="font-family: monospace; font-size: 8.5px; padding: 1px 3px; border-radius: 2px; background: #202025; color: #a1a1aa; border: 1px solid #2b2b32;">
-                  ${escapeXml(c.type)}
-                </span>
-              </div>
-              <div class="agent-action" style="font-size: 9.5px; padding-left: 14px;">
-                ${escapeXml(cDetailText)}
-              </div>
-              <div class="card-bottom" style="font-size: 9px; padding-left: 14px;">
-                <span>${escapeXml(c.model || 'inherit')}</span>
-                <span style="color: ${cStatusColor}; font-weight: 600;">${cColors.isDone ? '✓' : cStatusText}</span>
-              </div>
-            </div>
-          `;
-        });
-        html += `</div>`;
-      }
+    roots.forEach((r) => {
+      html += renderSidebarNode(r, 1);
     });
   } else {
     // Flat layout for subagents without hierarchy
@@ -814,29 +846,22 @@ function renderSidebar() {
       const isSelected = state.selectedId === sub.id;
       const colors = getNodeColors(sub);
 
-      let statusText = colors.badgeText;
-      let statusColor = colors.badgeFg;
       let dotPulse = '';
-
       if (colors.isWaiting) {
-        statusText = 'REQUIRES APPROVAL';
-        statusColor = '#f59e0b';
         dotPulse = '<span class="live-dot dot-pulse" style="width: 5px; height: 5px; background: #f59e0b;"></span> <span style="font-size: 10px;">⚠️</span>';
       } else if (colors.isRunning) {
-        statusText = 'RUNNING';
-        statusColor = '#38bdf8';
         dotPulse = '<span class="live-dot dot-pulse" style="width: 5px; height: 5px; background: #38bdf8;"></span>';
       } else if (colors.isDone) {
-        statusText = 'COMPLETED';
-        statusColor = '#10b981';
-        dotPulse = '<span style="color: #10b981;">✓</span>';
+        dotPulse = '<span class="live-dot" style="width: 5px; height: 5px; background: #10b981;"></span>';
       } else if (colors.isErrored) {
-        statusText = 'ERROR';
-        statusColor = '#f43f5e';
         dotPulse = '<span style="color: #f43f5e;">✕</span>';
       }
 
       const detailText = sub.stateDetail || sub.lastTool || 'active';
+      const subModelName = getModelDisplay(sub);
+      const subModelBottom = subModelName
+        ? `<div class="card-bottom"><span class="model-full-name" title="Modelo: ${escapeXml(subModelName)}">${escapeXml(subModelName)}</span></div>`
+        : '';
 
       html += `
         <div class="subagent-card ${isSelected ? 'active' : ''} ${colors.isWaiting ? 'waiting' : ''}" onclick="window.selectNode('${sub.id}')">
@@ -852,10 +877,7 @@ function renderSidebar() {
           <div class="agent-action">
             ${escapeXml(detailText)}
           </div>
-          <div class="card-bottom">
-            <span>${escapeXml(sub.model || 'inherit')}</span>
-            <span style="color: ${statusColor}; font-weight: 600;">${statusText}</span>
-          </div>
+          ${subModelBottom}
         </div>
       `;
     });
@@ -879,7 +901,8 @@ function updateInspector() {
 
   if (state.selectedId === 'root') {
     if (titleEl) titleEl.textContent = 'Main Agent';
-    if (badgeEl) badgeEl.textContent = 'chat-root';
+    const mainModel = state.mainAgent?.model || '';
+    if (badgeEl) badgeEl.textContent = mainModel ? `chat-root • ${mainModel}` : 'chat-root';
     const isRunning = state.mainAgent?.state === 'running';
     if (stateEl) stateEl.textContent = `Status: ${isRunning ? 'Executing' : 'Monitoring'}`;
     if (statusDot) {
@@ -900,8 +923,11 @@ function updateInspector() {
     const isRunning = sub.state === 'running';
     const isDone = sub.state === 'done';
 
+    const subModelName = getModelDisplay(sub);
     if (titleEl) titleEl.textContent = sub.role;
-    if (badgeEl) badgeEl.textContent = sub.type || 'subagent';
+    if (badgeEl) badgeEl.textContent = subModelName
+      ? `${sub.type || 'subagent'} • ${subModelName}`
+      : (sub.type || 'subagent');
     if (chatInput) chatInput.placeholder = `Send instruction to ${sub.role} (Enter to send)...`;
 
     if (statusDot) {
@@ -974,23 +1000,206 @@ function escapeXml(unsafe) {
 
 function formatMessageText(raw) {
   if (!raw) return '';
-  let text = escapeXml(raw);
 
-  // Fenced code blocks
-  text = text.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (m, lang, code) => {
-    return `<pre><code>${code.trim()}</code></pre>`;
+  // Extract and preserve code blocks first
+  const codeBlocks = [];
+  let text = String(raw).replace(/```([a-zA-Z0-9_-]*)\r?\n([\s\S]*?)```/g, (match, lang, code) => {
+    const idx = codeBlocks.length;
+    codeBlocks.push({ lang: lang || '', code: code.trim() });
+    return `___CODE_BLOCK_${idx}___`;
   });
 
-  // Inline code
-  text = text.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  // Extract and preserve inline code
+  const inlineCodes = [];
+  text = text.replace(/`([^`\r\n]+)`/g, (match, code) => {
+    const idx = inlineCodes.length;
+    inlineCodes.push(code);
+    return `___INLINE_CODE_${idx}___`;
+  });
 
-  // Bold
-  text = text.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+  // Escape HTML on the rest
+  text = escapeXml(text);
 
-  // Bullet items
-  text = text.replace(/^[\s]*[-*]\s+([^\n]+)/gm, '• $1');
+  // Split into lines for block-level parsing
+  const lines = text.split(/\r?\n/);
+  const outLines = [];
+  let inAlert = null;
+  let alertContent = [];
+  // Stack-based nested list tracker
+  // Each entry: { type: 'ul'|'ol', indent: number }
+  const listStack = [];
 
-  return text;
+  function closeListsToIndent(targetIndent = -1, nextType = null) {
+    while (listStack.length > 0) {
+      const top = listStack[listStack.length - 1];
+      if (top.indent > targetIndent || (top.indent === targetIndent && nextType && top.type !== nextType)) {
+        outLines.push(top.type === 'ul' ? '</ul>' : '</ol>');
+        listStack.pop();
+      } else {
+        break;
+      }
+    }
+  }
+
+  function closeAllLists() {
+    closeListsToIndent(-1);
+  }
+
+  function closeAlert() {
+    if (inAlert) {
+      const type = inAlert.type.toLowerCase();
+      const title = inAlert.type.toUpperCase();
+      const innerHtml = alertContent.join('<br/>');
+      outLines.push(`
+        <div class="ag-callout ag-callout-${type}">
+          <div class="ag-callout-header">
+            <span class="ag-callout-icon">${inAlert.icon}</span>
+            <span class="ag-callout-title">${title}</span>
+          </div>
+          <div class="ag-callout-body">${innerHtml}</div>
+        </div>
+      `);
+      inAlert = null;
+      alertContent = [];
+    }
+  }
+
+  const alertIcons = {
+    TIP: '💡',
+    NOTE: 'ℹ️',
+    IMPORTANT: '⚡',
+    WARNING: '⚠️',
+    CAUTION: '🛑'
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    // GitHub alert blockquote start: > [!TIP], > [!NOTE], etc.
+    const alertMatch = trimmed.match(/^&gt;\s*\[!(TIP|NOTE|IMPORTANT|WARNING|CAUTION)\]/i);
+    if (alertMatch) {
+      closeAllLists();
+      closeAlert();
+      const type = alertMatch[1].toUpperCase();
+      inAlert = {
+        type,
+        icon: alertIcons[type] || 'ℹ️'
+      };
+      alertContent = [];
+      continue;
+    }
+
+    // Inside Alert Blockquote
+    if (inAlert) {
+      if (trimmed.startsWith('&gt;')) {
+        const bodyLine = trimmed.replace(/^&gt;\s?/, '');
+        if (bodyLine) alertContent.push(formatInline(bodyLine));
+        continue;
+      } else if (trimmed === '') {
+        continue;
+      } else {
+        closeAlert();
+      }
+    }
+
+    // Normal Blockquote
+    if (trimmed.startsWith('&gt;')) {
+      closeAllLists();
+      const quoteText = formatInline(trimmed.replace(/^&gt;\s?/, ''));
+      outLines.push(`<blockquote class="ag-blockquote">${quoteText}</blockquote>`);
+      continue;
+    }
+
+    // Horizontal Rule
+    if (/^(?:---|\*\*\*|___)\s*$/.test(trimmed)) {
+      closeAllLists();
+      outLines.push('<hr class="ag-hr" />');
+      continue;
+    }
+
+    // Headings: ### H3, ## H2, # H1
+    const hMatch = line.match(/^(#{1,4})\s+(.+)$/);
+    if (hMatch) {
+      closeAllLists();
+      const level = hMatch[1].length;
+      const hText = formatInline(hMatch[2]);
+      outLines.push(`<h${level + 1} class="ag-heading ag-h${level}">${hText}</h${level + 1}>`);
+      continue;
+    }
+
+    // Check for Unordered List Item: e.g. "   - item", " * item"
+    const ulMatch = line.match(/^(\s*)(?:[-*+]|\&#42;)\s+(.+)$/);
+    // Check for Ordered List Item: e.g. "  1. item"
+    const olMatch = line.match(/^(\s*)\d+\.\s+(.+)$/);
+
+    if (ulMatch || olMatch) {
+      const match = ulMatch || olMatch;
+      const type = ulMatch ? 'ul' : 'ol';
+      const indentStr = match[1] || '';
+      // Approximate indentation level (tabs or spaces: 2 spaces or 1 tab = 1 level)
+      const indentSpaces = indentStr.replace(/\t/g, '  ').length;
+
+      // Close deeper lists or different type at same indentation level
+      closeListsToIndent(indentSpaces, type);
+
+      // Open new list if this is deeper than current top or list is empty
+      if (listStack.length === 0 || indentSpaces > listStack[listStack.length - 1].indent) {
+        outLines.push(`<${type} class="ag-${type}">`);
+        listStack.push({ type, indent: indentSpaces });
+      }
+
+      outLines.push(`<li>${formatInline(match[2])}</li>`);
+      continue;
+    }
+
+    // Regular line / Paragraph
+    closeAllLists();
+    if (trimmed === '') {
+      outLines.push('<div class="ag-spacer"></div>');
+    } else {
+      outLines.push(`<p class="ag-p">${formatInline(line)}</p>`);
+    }
+  }
+
+  closeAllLists();
+  closeAlert();
+
+  let rendered = outLines.join('\n');
+
+  // Inline format helper
+  function formatInline(str) {
+    if (!str) return '';
+    // Bold
+    str = str.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+    // Italic
+    str = str.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+    // Strikethrough
+    str = str.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
+    // Links: [text](url)
+    str = str.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" class="ag-link" target="_blank" rel="noopener">$1</a>');
+    return str;
+  }
+
+  // Restore Inline Code
+  rendered = rendered.replace(/___INLINE_CODE_(\d+)___/g, (m, idx) => {
+    const code = inlineCodes[Number(idx)] || '';
+    return `<code class="ag-code-inline">${escapeXml(code)}</code>`;
+  });
+
+  // Restore Code Blocks
+  rendered = rendered.replace(/___CODE_BLOCK_(\d+)___/g, (m, idx) => {
+    const block = codeBlocks[Number(idx)];
+    if (!block) return '';
+    return `
+      <div class="ag-code-block">
+        ${block.lang ? `<div class="ag-code-header"><span class="ag-code-lang">${escapeXml(block.lang)}</span></div>` : ''}
+        <pre><code class="language-${escapeXml(block.lang)}">${escapeXml(block.code)}</code></pre>
+      </div>
+    `;
+  });
+
+  return rendered;
 }
 
 window.toggleThoughtBlock = (thoughtEl, event) => {
@@ -1159,7 +1368,10 @@ async function fetchExecutionSteps() {
         <div class="ag-activity-group ${isOpen ? 'is-open' : ''}" data-id="${gid}">
           <div class="ag-activity-header" onclick="toggleActivityGroup(this.parentElement, event)">
             <div class="ag-activity-summary">
-              <span style="color: #38bdf8; font-size: 11px;">⚡</span>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;">
+                <path d="M12 2a7 7 0 0 0-7 7c0 2.5 1.3 4.7 3.3 6 .4.3.7.8.7 1.3V17h6v-.7c0-.5.3-1 .7-1.3 2-1.3 3.3-3.5 3.3-6a7 7 0 0 0-7-7z"/>
+                <path d="M9 21h6"/>
+              </svg>
               <span>${escapeXml(summaryText)}</span>
               <span class="ag-activity-badge">${actionCount + thoughtCount} step${actionCount + thoughtCount > 1 ? 's' : ''}</span>
             </div>
@@ -1198,7 +1410,11 @@ async function fetchExecutionSteps() {
         html += `
           <div class="chat-msg-assistant">
             <div class="msg-meta">
-              <span class="msg-avatar">⚡</span>
+              <span class="msg-avatar" title="${escapeXml(agentName)}">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 1c.5 5 4.5 9 9.5 9.5-5 .5-9 4.5-9.5 9.5-.5-5-4.5-9-9.5-9.5 5-.5 9-4.5 9.5-9.5z"/>
+                </svg>
+              </span>
               <span>${escapeXml(agentName)}</span>
               ${timeStr ? `<span style="margin-left: auto; color: #71717a; font-weight: normal; font-size: 10px;">${escapeXml(timeStr)}</span>` : ''}
             </div>
@@ -1537,7 +1753,17 @@ function setupInspectorResizer() {
 
 async function init() {
   if ($('btn-refresh')) {
-    $('btn-refresh').addEventListener('click', fetchStatus);
+    $('btn-refresh').addEventListener('click', async () => {
+      const btn = $('btn-refresh');
+      btn.classList.add('is-refreshing');
+      try {
+        await fetchStatus();
+      } finally {
+        setTimeout(() => {
+          btn.classList.remove('is-refreshing');
+        }, 650);
+      }
+    });
   }
 
   if ($('direct-msg-send')) {

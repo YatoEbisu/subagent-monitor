@@ -1,5 +1,13 @@
 {
   "name": "subagent-monitor",
+  "displayName": "Subagent Monitor",
+  "version": "1.0.0",
   "description": "Real-time visual subagent monitor and DAG execution graph for any project.",
-  "logo": "assets/logo.svg"
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Open the Subagent Monitor panel",
+    "Launch parallel subagents and monitor their execution",
+    "Show the subagent execution DAG"
+  ]
 }
+

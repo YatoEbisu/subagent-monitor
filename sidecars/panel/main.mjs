@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir, platform, release } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,66 +32,320 @@ function safeParseJson(str) {
   }
 }
 
-// Verifica se o subagente está aguardando aprovação ou input do usuário
-function isSubagentWaitingInput(subConversationId) {
-  if (!subConversationId) return false;
-  const subLog = join(homedir(), '.gemini', 'antigravity', 'brain', subConversationId, '.system_generated', 'logs', 'transcript.jsonl');
-  if (!existsSync(subLog)) return false;
+// Detecta com precisão o ciclo de vida real do subagente (running, waiting_for_input, done, errored)
+function detectSubagentLifecycle(subConversationId, parentConversationId) {
+  if (!subConversationId) {
+    return { state: 'running', lastTool: 'invoke_subagent', stateDetail: 'Starting subagent...' };
+  }
+
+  const brainRoot = join(homedir(), '.gemini', 'antigravity', 'brain');
+  const subBrain = join(brainRoot, subConversationId);
+
+  // 1. Verificar se foi finalizado/morto pelo Antigravity (registro oficial no pai)
+  if (parentConversationId) {
+    const descriptorPath = join(brainRoot, parentConversationId, '.system_generated', 'subagents', `${subConversationId}.json`);
+    if (existsSync(descriptorPath)) {
+      try {
+        const desc = safeParseJson(readFileSync(descriptorPath, 'utf8'));
+        if (desc && desc.state === 'SUBAGENT_STATE_KILLED') {
+          return {
+            state: 'done',
+            lastTool: 'Completed Successfully',
+            stateDetail: 'Task completed'
+          };
+        }
+      } catch {}
+    }
+  }
+
+  // 2. Ler transcript do subagente
+  let logFile = join(subBrain, '.system_generated', 'logs', 'transcript_full.jsonl');
+  if (!existsSync(logFile)) {
+    logFile = join(subBrain, '.system_generated', 'logs', 'transcript.jsonl');
+  }
+
+  if (!existsSync(logFile)) {
+    return {
+      state: 'running',
+      lastTool: 'invoke_subagent',
+      stateDetail: 'Initializing subagent transcript'
+    };
+  }
 
   try {
-    const raw = readFileSync(subLog, 'utf8').trim();
+    const raw = readFileSync(logFile, 'utf8').trim();
     const lines = raw.split(/\r?\n/).filter(Boolean);
-    if (lines.length === 0) return false;
+    if (lines.length === 0) {
+      return {
+        state: 'running',
+        lastTool: 'invoke_subagent',
+        stateDetail: 'Waiting for first step'
+      };
+    }
 
-    // Apenas os últimos 2 steps representam o estado ATUAL
-    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 2); i--) {
-      const step = safeParseJson(lines[i]);
-      if (!step) continue;
+    const steps = [];
+    for (const l of lines) {
+      const parsed = safeParseJson(l);
+      if (parsed) steps.push(parsed);
+    }
 
-      if (step.status === 'WAITING_FOR_INPUT' || step.type === 'WAITING_FOR_INPUT') {
-        return true;
-      }
-      if (step.tool_calls && Array.isArray(step.tool_calls)) {
-        if (step.tool_calls.some(c => c.name === 'ask_question')) {
-          if (i === lines.length - 1) return true;
+    if (steps.length === 0) {
+      return {
+        state: 'running',
+        lastTool: 'invoke_subagent',
+        stateDetail: 'Initializing subagent'
+      };
+    }
+
+    // 3. Rastrear tarefas assíncronas em segundo plano (timers com schedule, comandos longos)
+    const launchedTasks = new Map();
+    const finishedTasks = new Set();
+
+    for (let idx = 0; idx < steps.length; idx++) {
+      const step = steps[idx];
+
+      if (step.content && typeof step.content === 'string') {
+        const taskMatch = step.content.match(/task id:\s*([^\s\r\n]+)/i);
+        if (taskMatch && taskMatch[1]) {
+          const fullId = taskMatch[1];
+          const shortId = fullId.split('/').pop();
+          let desc = 'Background task';
+          const descMatch = step.content.match(/Task Description:\s*([^\r\n]+)/i);
+          if (descMatch && descMatch[1]) desc = descMatch[1].trim();
+          const isTimer = desc.toLowerCase().includes('timer') || step.content.toLowerCase().includes('timer:');
+          launchedTasks.set(shortId, { fullId, desc, isTimer });
+        }
+
+        if (step.source === 'SYSTEM' || step.type === 'SYSTEM_MESSAGE') {
+          const senderMatch = step.content.match(/sender=([^\s]+)/i);
+          if (senderMatch && senderMatch[1]) {
+            const sender = senderMatch[1];
+            for (const [sId, info] of launchedTasks.entries()) {
+              if (sender.includes(sId) || sender === info.fullId) {
+                finishedTasks.add(sId);
+              }
+            }
+          }
         }
       }
     }
-  } catch {}
-  return false;
-}
 
-// Verifica no log próprio do subagente se ele já concluiu
-function isSubagentFinished(subConversationId) {
-  if (!subConversationId) return false;
-  const subLog = join(homedir(), '.gemini', 'antigravity', 'brain', subConversationId, '.system_generated', 'logs', 'transcript.jsonl');
-  if (!existsSync(subLog)) return false;
-
-  try {
-    const raw = readFileSync(subLog, 'utf8').trim();
-    const lines = raw.split(/\r?\n/).filter(Boolean);
-    if (lines.length === 0) return false;
-
-    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 5); i--) {
-      const step = safeParseJson(lines[i]);
-      if (!step) continue;
-
-      if (step.tool_calls && Array.isArray(step.tool_calls)) {
-        if (step.tool_calls.some(c => c.name === 'send_message')) {
-          return true;
+    // Verificar arquivos de log de tasks em disco
+    const activeTasks = [];
+    for (const [sId, info] of launchedTasks.entries()) {
+      if (!finishedTasks.has(sId)) {
+        const taskLogPath = join(subBrain, '.system_generated', 'tasks', `${sId}.log`);
+        if (existsSync(taskLogPath)) {
+          try {
+            const logTxt = readFileSync(taskLogPath, 'utf8');
+            if (
+              logTxt.includes('Timer fired') ||
+              logTxt.includes('finished with result:') ||
+              logTxt.includes('exited with code') ||
+              logTxt.includes('was canceled') ||
+              logTxt.includes('Task completed')
+            ) {
+              finishedTasks.add(sId);
+              continue;
+            }
+          } catch {}
         }
-      }
-
-      if (step.source === 'MODEL' && step.type === 'PLANNER_RESPONSE' && (!step.tool_calls || step.tool_calls.length === 0)) {
-        return true;
+        activeTasks.push(info);
       }
     }
-  } catch {}
-  return false;
+
+    // 4. Verificar conclusão via send_message para o chamador/pai
+    let lastSendMessageIndex = -1;
+    let toolCallsAfterSendMessage = 0;
+    let lastToolCall = null;
+
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      if (step.tool_calls && Array.isArray(step.tool_calls)) {
+        for (const tc of step.tool_calls) {
+          lastToolCall = tc;
+          if (tc.name === 'send_message') {
+            lastSendMessageIndex = i;
+            toolCallsAfterSendMessage = 0;
+          } else if (lastSendMessageIndex !== -1) {
+            toolCallsAfterSendMessage++;
+          }
+        }
+      }
+    }
+
+    if (lastSendMessageIndex !== -1 && toolCallsAfterSendMessage === 0) {
+      return {
+        state: 'done',
+        lastTool: 'Completed Successfully',
+        stateDetail: 'Report sent to caller'
+      };
+    }
+
+    // 5. Verificar se o pai recebeu mensagem deste subagente
+    if (parentConversationId) {
+      const parentMessagesDir = join(brainRoot, parentConversationId, '.system_generated', 'messages');
+      if (existsSync(parentMessagesDir)) {
+        try {
+          const mFiles = readdirSync(parentMessagesDir);
+          for (const mf of mFiles) {
+            if (mf.endsWith('.json') && mf !== 'read.json') {
+              const mData = safeParseJson(readFileSync(join(parentMessagesDir, mf), 'utf8'));
+              if (mData && mData.sender === subConversationId && toolCallsAfterSendMessage === 0) {
+                return {
+                  state: 'done',
+                  lastTool: 'Completed Successfully',
+                  stateDetail: 'Result delivered to caller'
+                };
+              }
+            }
+          }
+        } catch {}
+      }
+    }
+
+    // 6. Verificar se ocorreu erro
+    const lastStep = steps[steps.length - 1];
+    if (lastStep.status === 'ERROR') {
+      return {
+        state: 'errored',
+        lastTool: 'Error',
+        stateDetail: 'Error occurred during execution'
+      };
+    }
+
+    // 7. Verificar se está aguardando input/aprovação (status nativo, ask_question, prompt de segurança ou texto de bloqueio)
+    if (lastStep.status === 'WAITING_FOR_INPUT' || lastStep.type === 'WAITING_FOR_INPUT') {
+      return {
+        state: 'waiting_for_input',
+        lastTool: 'Requires Approval',
+        stateDetail: 'Awaiting user response'
+      };
+    }
+    if (lastStep.tool_calls && Array.isArray(lastStep.tool_calls) && lastStep.tool_calls.some(c => c.name === 'ask_question')) {
+      return {
+        state: 'waiting_for_input',
+        lastTool: 'Requires Approval',
+        stateDetail: 'Awaiting answer to question'
+      };
+    }
+
+    if (lastStep.content && typeof lastStep.content === 'string') {
+      const cLower = lastStep.content.toLowerCase();
+      if (
+        cLower.includes('aprovação necessária') ||
+        cLower.includes('aguardando aprovação') ||
+        cLower.includes('aprovacao necessaria') ||
+        cLower.includes('aguardando aprovacao') ||
+        cLower.includes('needs approval') ||
+        cLower.includes('requires approval') ||
+        cLower.includes('travado em requerer aprovação') ||
+        cLower.includes('bloqueado aguardando aprovação')
+      ) {
+        return {
+          state: 'waiting_for_input',
+          lastTool: 'Requires Approval',
+          stateDetail: 'Awaiting user approval'
+        };
+      }
+    }
+
+    // Verificar se o transcript do pai registrou este subagente como waiting_for_input / blocked / needs_attention
+    if (parentConversationId) {
+      const parentLog = join(brainRoot, parentConversationId, '.system_generated', 'logs', 'transcript_full.jsonl');
+      const fallbackLog = join(brainRoot, parentConversationId, '.system_generated', 'logs', 'transcript.jsonl');
+      const pLogFile = existsSync(parentLog) ? parentLog : (existsSync(fallbackLog) ? fallbackLog : null);
+      if (pLogFile) {
+        try {
+          const pRaw = readFileSync(pLogFile, 'utf8');
+          const lastSubIdx = pRaw.lastIndexOf(subConversationId);
+          if (lastSubIdx !== -1) {
+            const surrounding = pRaw.slice(Math.max(0, lastSubIdx - 200), Math.min(pRaw.length, lastSubIdx + 300));
+            if (
+              surrounding.includes('"waiting_for_input"') ||
+              surrounding.includes('"blocked"') ||
+              surrounding.includes('"needs_attention"')
+            ) {
+              return {
+                state: 'waiting_for_input',
+                lastTool: 'Requires Approval',
+                stateDetail: 'Awaiting user response'
+              };
+            }
+          }
+        } catch {}
+      }
+    }
+
+    // 8. Se houver tarefa de segundo plano ativa (timers, background tasks)
+    if (activeTasks.length > 0) {
+      const first = activeTasks[0];
+      const descLower = (first.desc || '').toLowerCase();
+      if (descLower.includes('aprovação') || descLower.includes('aprovacao') || descLower.includes('approval')) {
+        return {
+          state: 'waiting_for_input',
+          lastTool: 'Requires Approval',
+          stateDetail: first.desc || 'Awaiting user approval'
+        };
+      }
+      const detail = first.isTimer
+        ? (first.desc || 'Timer in progress')
+        : (first.desc || 'Background task running');
+      return {
+        state: 'running',
+        lastTool: first.isTimer ? 'timer' : 'background_task',
+        stateDetail: detail
+      };
+    }
+
+    // 9. Atualmente executando ferramenta ou gerando
+    if (lastStep.source === 'MODEL' && lastStep.tool_calls && lastStep.tool_calls.length > 0) {
+      const tc = lastStep.tool_calls[lastStep.tool_calls.length - 1];
+      const summary = (tc.args?.toolSummary || tc.args?.toolAction || tc.name).replace(/^["']|["']$/g, '');
+      return {
+        state: 'running',
+        lastTool: tc.name,
+        stateDetail: summary
+      };
+    }
+
+    if (lastStep.source === 'MODEL' && lastStep.type === 'GENERIC') {
+      const toolName = lastToolCall?.name || 'active';
+      return {
+        state: 'running',
+        lastTool: toolName,
+        stateDetail: 'Processing tool output...'
+      };
+    }
+
+    // Se o último passo for PLANNER_RESPONSE sem tools, sem tasks pendentes e após múltiplos passos
+    if (lastStep.source === 'MODEL' && lastStep.type === 'PLANNER_RESPONSE') {
+      if (steps.length >= 3 && lastToolCall) {
+        return {
+          state: 'done',
+          lastTool: 'Completed Successfully',
+          stateDetail: 'Execution finished'
+        };
+      }
+    }
+
+    return {
+      state: 'running',
+      lastTool: lastToolCall?.name || 'Working...',
+      stateDetail: 'Subagent active'
+    };
+  } catch (err) {
+    console.error(`Error detecting status for subagent ${subConversationId}:`, err);
+    return {
+      state: 'running',
+      lastTool: 'Working...',
+      stateDetail: 'Active'
+    };
+  }
 }
 
 // Parser recursivo que extrai subagentes e subagentes aninhados (filhos)
-function parseTranscriptForSubagents(targetConversationId, parentId = null) {
+function parseTranscriptForSubagents(targetConversationId, parentId = null, activeModelName = null) {
   let logFile = join(homedir(), '.gemini', 'antigravity', 'brain', targetConversationId, '.system_generated', 'logs', 'transcript_full.jsonl');
   if (!existsSync(logFile)) {
     logFile = join(homedir(), '.gemini', 'antigravity', 'brain', targetConversationId, '.system_generated', 'logs', 'transcript.jsonl');
@@ -119,13 +373,16 @@ function parseTranscriptForSubagents(targetConversationId, parentId = null) {
                 if (!s || (!s.Role && !s.TypeName && !s.Prompt)) continue;
                 const role = s.Role || s.TypeName || 'Subagente';
                 pendingInvokedRoles.push(role);
+                const rawModel = s.Model || '';
+                const effectiveModel = (rawModel && rawModel.toLowerCase() !== 'inherit') ? rawModel : (activeModelName || '');
                 subsMap.set(role, {
                   id: role,
                   role: role,
                   type: s.TypeName || 'generic',
                   parentId: parentId,
                   prompt: s.Prompt || '',
-                  model: s.Model || 'inherit',
+                  model: rawModel,
+                  effectiveModel: effectiveModel,
                   workspace: s.Workspace || 'inherit',
                   state: 'running',
                   lastTool: 'invoke_subagent',
@@ -169,12 +426,12 @@ function parseTranscriptForSubagents(targetConversationId, parentId = null) {
                   }
                 }
               }
-              if (!existing) continue; // Apenas atualizar subagentes que foram de fato invocados!
+              if (!existing) continue;
 
               let state = item.state || 'running';
               if (state === 'idle') {
                 state = 'done';
-              } else if (state === 'waiting_for_input' || state === 'blocked') {
+              } else if (state === 'waiting_for_input' || state === 'blocked' || state === 'needs_attention') {
                 state = 'waiting_for_input';
               }
               existing.state = state;
@@ -192,23 +449,31 @@ function parseTranscriptForSubagents(targetConversationId, parentId = null) {
     const seenIds = new Set();
     for (const [key, sub] of subsMap.entries()) {
       if (sub.conversationId) {
-        if (isSubagentFinished(sub.conversationId)) {
-          sub.state = 'done';
-          sub.lastTool = 'Completed Successfully';
-        } else if (isSubagentWaitingInput(sub.conversationId)) {
-          sub.state = 'waiting_for_input';
+        const lifecycle = detectSubagentLifecycle(sub.conversationId, targetConversationId);
+        // Se já sabemos que este subagente está aguardando aprovação/input (pelo manage_subagents ou por solicitação),
+        // só aceitamos transição se ele tiver concluído ('done') ou falhado ('errored').
+        // NUNCA rebaixa 'waiting_for_input' para 'running' enquanto a aprovação/permissão estiver pendente!
+        if (sub.state === 'waiting_for_input' && lifecycle.state === 'running') {
           sub.lastTool = 'Requires Approval';
+          if (!sub.stateDetail || sub.stateDetail === 'invoke_subagent') {
+            sub.stateDetail = lifecycle.stateDetail || 'Awaiting user approval';
+          }
+        } else {
+          sub.state = lifecycle.state;
+          sub.lastTool = lifecycle.lastTool;
+          sub.stateDetail = lifecycle.stateDetail;
         }
       }
       result.push(sub);
       if (sub.conversationId) seenIds.add(sub.conversationId);
       seenIds.add(sub.id);
 
-      // Recursive reading of nested subagents (children)
+      // Leitura recursiva de subagentes aninhados (filhos)
       if (sub.conversationId) {
-        const nested = parseTranscriptForSubagents(sub.conversationId, sub.id);
+        const nested = parseTranscriptForSubagents(sub.conversationId, sub.id, activeModelName);
         for (const child of nested) {
-          if (!seenIds.has(child.conversationId) && !seenIds.has(child.id)) {
+          const isDuplicate = child.conversationId ? seenIds.has(child.conversationId) : seenIds.has(child.id);
+          if (!isDuplicate) {
             result.push(child);
             if (child.conversationId) seenIds.add(child.conversationId);
             seenIds.add(child.id);
@@ -254,6 +519,26 @@ app.api('/api/subagents', (query) => {
     const lines = rawContent.split(/\r?\n/).filter(Boolean);
     totalSteps = lines.length;
 
+    let activeModelName = null;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const step = safeParseJson(lines[i]);
+      if (!step) continue;
+      // Extrair APENAS de mensagens legítimas do usuário/sistema, nunca de saídas de ferramentas ou código
+      if (step.source === 'USER_EXPLICIT' || step.type === 'USER_INPUT') {
+        const content = step.content || '';
+        if (content.includes('<USER_SETTINGS_CHANGE>') && content.includes('Model Selection')) {
+          const m = content.match(/<USER_SETTINGS_CHANGE>[\s\S]*?`Model Selection`\s+(?:changed\s+)?from\s+.*?\s+to\s+([A-Za-z0-9\s._\-()]+?)\.\s+No need[\s\S]*?<\/USER_SETTINGS_CHANGE>/i);
+          if (m && m[1]) {
+            const candidate = m[1].trim();
+            if (candidate.length <= 40 && !candidate.includes('\n') && !candidate.includes('{') && !candidate.includes('}')) {
+              activeModelName = candidate;
+              break;
+            }
+          }
+        }
+      }
+    }
+
     for (let i = lines.length - 1; i >= 0; i--) {
       const step = safeParseJson(lines[i]);
       if (step && step.tool_calls && Array.isArray(step.tool_calls) && step.tool_calls.length > 0) {
@@ -263,7 +548,7 @@ app.api('/api/subagents', (query) => {
       }
     }
 
-    const subagentsList = parseTranscriptForSubagents(conversationId, null);
+    const subagentsList = parseTranscriptForSubagents(conversationId, null, activeModelName);
     const activeCount = subagentsList.filter(s => s.state === 'running').length;
 
     return {
@@ -275,6 +560,7 @@ app.api('/api/subagents', (query) => {
         role: 'Main Agent',
         state: mainAgentState,
         lastAction: mainAgentAction,
+        model: activeModelName,
         totalSteps: totalSteps
       }
     };
@@ -419,7 +705,7 @@ function parseExecutionSteps(targetConversationId) {
           const tc = step.tool_calls[tcIdx];
           const args = tc.args || {};
           let verb = 'Action';
-          let badge = { label: '⚡', color: '#38bdf8' };
+          let badge = { label: '⚙', color: '#38bdf8' };
           let target = '';
           let details = '';
           let diffAdd = 0;
@@ -484,7 +770,7 @@ function parseExecutionSteps(targetConversationId) {
             target = 'message to parent';
           } else {
             verb = tc.name;
-            badge = { label: '⚡', color: '#38bdf8' };
+            badge = { label: '⚙', color: '#38bdf8' };
             target = (args.toolSummary || args.toolAction || tc.name).replace(/^["']|["']$/g, '');
           }
 

@@ -75,26 +75,28 @@
         <!-- BOTTOM INSPECTOR FOR SELECTED NODE -->
         <section class="inspector-panel" id="inspector-panel">
           <div class="inspector-header">
-            <div class="inspector-title-group">
-              <button id="btn-toggle-inspector" class="inspector-toggle-btn" title="Toggle Inspector Panel">
-                <span id="insp-toggle-icon">▼</span>
-              </button>
-              <button id="btn-expand-inspector" class="inspector-toggle-btn" title="Maximize / Restore Height">
-                <span id="insp-expand-icon">⤢</span>
-              </button>
+            <div class="inspector-header-left">
               <span class="live-dot" id="insp-status-dot"></span>
               <span id="insp-title" style="font-weight: 600; font-size: 12px;">Main Agent</span>
               <span class="node-badge" id="insp-badge">chat-root</span>
-            </div>
-
-            <div class="inspector-header-right">
               <div class="inspector-tabs">
                 <button id="tab-overview" class="inspector-tab" title="Show node prompt and status">Overview</button>
                 <button id="tab-execution" class="inspector-tab active" title="Show real-time chat and execution timeline">
                   Chat & Timeline <span id="execution-badge" class="tab-badge">0</span>
                 </button>
               </div>
+            </div>
+
+            <div class="inspector-header-right">
               <span id="insp-state" class="insp-status-text">Status: Monitoring</span>
+              <div class="inspector-actions-group">
+                <button id="btn-expand-inspector" class="inspector-toggle-btn" title="Maximize / Restore Height">
+                  <span id="insp-expand-icon">⤢</span>
+                </button>
+                <button id="btn-toggle-inspector" class="inspector-toggle-btn" title="Toggle Inspector Panel">
+                  <span id="insp-toggle-icon">▼</span>
+                </button>
+              </div>
             </div>
           </div>
 
